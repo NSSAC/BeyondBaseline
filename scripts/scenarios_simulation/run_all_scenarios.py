@@ -28,7 +28,7 @@ def parse_args():
         description="Run scenarios 1-8; save 3 images (each 1x3). Also outputs AUC rankings. Infections required."
     )
     ap.add_argument("--linelist", required=True, help="Path to simulated_test_positive_linelist.csv")
-    ap.add_argument("--population", required=True, help="Path to va_persontrait_epihiper.txt (skiprows=1)")
+    ap.add_argument("--population", required=True, help="Path to va_persontrait_epihiper.csv")
     ap.add_argument("--infections", required=True, help="Path to infections TSV")
     ap.add_argument("--date-field", default=DATE_FIELD_DEFAULT, help=f"Linelist date column (default: {DATE_FIELD_DEFAULT})")
     ap.add_argument("--start-date", default=str(START_DATE_DEFAULT.date()), help=f"Week slicing anchor date (default: {START_DATE_DEFAULT.date()})")
@@ -136,6 +136,7 @@ STRAT_ALIAS = {
     "race": "smh_race",
     "county": "county_fips",
     "sex": "sex",
+    "ses": "ses_category",
 }
 
 def _normalize_stratifiers(tokens: list[str]) -> list[str]:
@@ -307,7 +308,7 @@ def normalize_age_group_col(df, col="age_group"):
 # ----------------- load & preprocess -----------------
 def load_linelist_and_population(linelist_path, population_path, date_field, start_date, min_pool, features: list[str]):
     line_df = pd.read_csv(linelist_path, parse_dates=[date_field])
-    pop_df  = pd.read_csv(population_path, skiprows=1)
+    pop_df  = pd.read_csv(population_path)
 
     # Normalize age_group in both population and linelist (handles codes or long labels)
     pop_df  = normalize_age_group_col(pop_df,  "age_group")
@@ -496,48 +497,104 @@ def blended_target(linelist_dist, pop_dist, alpha=0.5):
     s = tgt.sum()
     return tgt / s if s > 0 else tgt
 
+
+def sampling_stride_weeks(scfg):
+    if scfg.get("sampling_mode") == "stride":
+        default_stride = scfg.get("decision_window_weeks", 1) or 1
+        return max(1, int(scfg.get("sampling_stride_weeks", default_stride)))
+    return 1
+
+
+def target_dist_at_week(weekly_ll_hist, pop_dist, scfg, week_idx):
+    if scfg.get("target_type") == "blend":
+        ll_mode = scfg.get("target_linelist_mode", "cumulative")
+        ll_window = scfg.get("target_linelist_window", 4)
+        alpha = scfg.get("blend_alpha", 0.5)
+        ll_dist = linelist_dist_at_week(weekly_ll_hist, week_idx, ll_mode, ll_window)
+        target_dist = blended_target(ll_dist, pop_dist, alpha)
+    elif scfg.get("target_mode") == "linelist_dynamic":
+        ll_mode = scfg.get("target_linelist_mode", "cumulative")
+        ll_window = scfg.get("target_linelist_window", 4)
+        target_dist = linelist_dist_at_week(weekly_ll_hist, week_idx, ll_mode, ll_window)
+    else:
+        target_dist = pop_dist
+
+    if target_dist is None or target_dist.empty:
+        target_dist = pop_dist
+    return target_dist
+
+
+def split_samples_by_calendar_week(sample_df, date_field, start_date, num_weeks):
+    if sample_df.empty or date_field not in sample_df.columns:
+        return {}
+
+    week0_start = start_date - pd.Timedelta(days=7)
+    dated = sample_df.copy()
+    dated[date_field] = pd.to_datetime(dated[date_field], errors="coerce")
+    dated = dated.dropna(subset=[date_field])
+    if dated.empty:
+        return {}
+
+    dated["_calendar_week_idx"] = ((dated[date_field] - week0_start).dt.days // 7).astype(int)
+    dated = dated[(dated["_calendar_week_idx"] >= 0) & (dated["_calendar_week_idx"] < num_weeks)]
+    if dated.empty:
+        return {}
+
+    out = {}
+    for week_idx, week_df in dated.groupby("_calendar_week_idx", sort=True):
+        out[int(week_idx)] = week_df.drop(columns=["_calendar_week_idx"]).copy()
+    return out
+
+
+def evaluation_week_numbers(scfg, n_points):
+    stride_weeks = sampling_stride_weeks(scfg)
+    if scfg.get("eval_metric") == "per_stride_kl" and stride_weeks > 1:
+        return list(range(stride_weeks, stride_weeks * n_points + 1, stride_weeks))
+    return list(range(1, n_points + 1))
+
 def per_stride_kl_vs_target(weekly_sample_hist, weekly_ll_hist, pop_dist, scfg):
     """
-    Per-stride (per-week) KL: each week's sample distribution vs that week's
-    actual target distribution (the same target the sampler was given).
+    Per-stride KL:
+    - default behavior: each week's sample distribution vs that week's target
+    - stride behavior: aggregate a full stride block, then compare it against the
+      target distribution for that block endpoint
 
     This reconstructs the target for each week using the scenario config,
     matching exactly what run_one_scenario computes at sampling time.
     """
+    stride_weeks = sampling_stride_weeks(scfg)
     out = []
-    n = len(weekly_sample_hist)
-    for i in range(n):
-        sample_counts = weekly_sample_hist[i]
+    if stride_weeks > 1:
+        eval_weeks = range(stride_weeks - 1, len(weekly_sample_hist), stride_weeks)
+    else:
+        eval_weeks = range(len(weekly_sample_hist))
+
+    for i in eval_weeks:
+        start_idx = max(0, i - stride_weeks + 1)
+        sample_counts = pd.Series(dtype=float)
+        for j in range(start_idx, i + 1):
+            if 0 <= j < len(weekly_sample_hist):
+                sample_counts = sample_counts.add(weekly_sample_hist[j], fill_value=0)
+
         if sample_counts.sum() == 0:
             out.append(float("nan"))
             continue
 
         sample_dist = sample_counts / sample_counts.sum()
-
-        # Reconstruct the target for this week (same logic as in the sampling loop)
-        if scfg.get("target_type") == "blend":
-            ll_mode   = scfg.get("target_linelist_mode", "cumulative")
-            ll_window = scfg.get("target_linelist_window", 4)
-            alpha     = scfg.get("blend_alpha", 0.5)
-            ll_dist   = linelist_dist_at_week(weekly_ll_hist, i, ll_mode, ll_window)
-            target_dist = blended_target(ll_dist, pop_dist, alpha)
-        elif scfg.get("target_mode") == "linelist_dynamic":
-            ll_mode   = scfg.get("target_linelist_mode", "cumulative")
-            ll_window = scfg.get("target_linelist_window", 4)
-            target_dist = linelist_dist_at_week(weekly_ll_hist, i, ll_mode, ll_window)
-        else:
-            target_dist = pop_dist
-
-        if target_dist is None or target_dist.empty:
-            target_dist = pop_dist
+        target_dist = target_dist_at_week(weekly_ll_hist, pop_dist, scfg, i)
 
         out.append(kl_dist(sample_dist, target_dist))
     return out
 
-def series_auc(ys):
-    """Trapezoidal AUC over weeks for a KL series; ignores NaNs. Lower is better."""
+def series_auc(ys, xs=None):
+    """Trapezoidal AUC over actual week positions; ignores NaNs. Lower is better."""
     y = np.asarray(list(ys), dtype=float)
-    x = np.arange(1, len(y) + 1, dtype=float)
+    if xs is None:
+        x = np.arange(1, len(y) + 1, dtype=float)
+    else:
+        x = np.asarray(list(xs), dtype=float)
+        if len(x) != len(y):
+            raise ValueError("series_auc requires xs and ys to have the same length.")
     m = np.isfinite(y)
     if m.sum() < 2:
         return float("nan")
@@ -588,6 +645,7 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
     for algo_name, sampler in algorithms.items():
         t0 = time.perf_counter()
         state = {}
+        stride_weeks = sampling_stride_weeks(scfg)
 
         if algo_name == "SURS":
             state["base_seed"] = overrides.get("base_seed", 0)
@@ -597,8 +655,8 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
 
         dec_win = scfg.get("decision_window_weeks", None)
         recent = deque(maxlen=max(0, (dec_win or 1) - 1))
-        current_week = start_date
-        week_idx_for_target = 0
+        current_week = start_date + timedelta(weeks=stride_weeks - 1)
+        week_idx_for_target = stride_weeks - 1
         rng = algo_rngs[algo_name]
 
         # starting bound for "history" pool (all past weeks up to current)
@@ -650,18 +708,7 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
                 break
 
             # ----- target distribution for this week -----
-            if scfg.get("target_type") == "blend":
-                ll_mode   = scfg.get("target_linelist_mode", "cumulative")
-                ll_window = scfg.get("target_linelist_window", 4)
-                alpha     = scfg.get("blend_alpha", 0.5)
-                ll_dist   = linelist_dist_at_week(weekly_ll_hist, week_idx_for_target, ll_mode, ll_window)
-                target_dist = blended_target(ll_dist, pop_dist_static, alpha)
-            elif scfg.get("target_mode") == "linelist_dynamic":
-                ll_mode   = scfg.get("target_linelist_mode", "cumulative")
-                ll_window = scfg.get("target_linelist_window", 4)
-                target_dist = linelist_dist_at_week(weekly_ll_hist, week_idx_for_target, ll_mode, ll_window)
-            else:
-                target_dist = pop_dist_static
+            target_dist = target_dist_at_week(weekly_ll_hist, pop_dist_static, scfg, week_idx_for_target)
 
             # ----- restrict target to available groups this week -----
             avail_groups = pool_df["group"].value_counts().index
@@ -727,14 +774,21 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
             if ov_norep or scfg.get("no_replacement", False):
                 used_idx.update(selected_base_idx)
 
-            weekly_hist[algo_name].append(sample_df["group"].value_counts())
-            weekly_samples[algo_name].append(sample_df)
+            sample_weeks = split_samples_by_calendar_week(
+                sample_df, date_field, start_date, num_weeks=len(weekly_ll_hist)
+            )
+            block_start_idx = max(0, week_idx_for_target - stride_weeks + 1)
 
-            if dec_win is not None:
-                recent.append(sample_df["group"].tolist())
+            for calendar_week_idx in range(block_start_idx, week_idx_for_target + 1):
+                week_sample_df = sample_weeks.get(calendar_week_idx, sample_df.iloc[0:0].copy())
+                weekly_hist[algo_name].append(week_sample_df["group"].value_counts())
+                weekly_samples[algo_name].append(week_sample_df)
 
-            current_week += timedelta(weeks=1)
-            week_idx_for_target += 1
+                if dec_win is not None:
+                    recent.append(week_sample_df["group"].tolist())
+
+            current_week += timedelta(weeks=stride_weeks)
+            week_idx_for_target += stride_weeks
 
         per_algo_time[algo_name] = time.perf_counter() - t0
 
@@ -841,8 +895,9 @@ def main():
                 label = f"{algo} vs. Population"
             else:
                 label = f"{algo} vs. Line List"
-            for i, v in enumerate(ys, start=1):
-                rows.append({"scenario": scfg["id"], "label": label, "week": i, "kl": float(v)})
+            eval_weeks = evaluation_week_numbers(scfg, len(ys))
+            for week_num, v in zip(eval_weeks, ys):
+                rows.append({"scenario": scfg["id"], "label": label, "week": week_num, "kl": float(v)})
                 # Panel A ("targets"): save KL per week
                 kl_rows.append({
                     "run_id": run_id,
@@ -852,10 +907,10 @@ def main():
                     "scenario_label": label,
                     "eval_type": "A_targets",
                     "roll_window": None,
-                    "week": i,
+                    "week": week_num,
                     "kl": float(v),
                 })
-            scenario_series[algo][scfg["id"]] = (list(range(1, len(ys)+1)), ys)
+            scenario_series[algo][scfg["id"]] = (eval_weeks, ys)
             total_algo_time[algo] += per_algo_time.get(algo, 0.0)
             count_algo_runs[algo] += 1
 
@@ -903,6 +958,7 @@ def main():
 
     marker_map = {1:"o", 2:"s", 3:"D", 4:"^", 5:"v", 6:">", 7:"P", 8:"X"}
     scenario_ids = [scfg["id"] for scfg in SCENARIOS]
+    scenario_cfg_map = {scfg["id"]: scfg for scfg in SCENARIOS}
     algo_list  = list(ALG.keys())
     n_algo    = len(algo_list)
     if False: #this isn't needed now that all_weekly_hist is populated in the original run
@@ -918,28 +974,72 @@ def main():
             )
             all_weekly_hist[scfg["id"]] = wh  # {algo -> [Series]}
 
-    # Small helpers for infections-based y-series
-    def _cum_kl_vs(hist_list, ref_hist_list):
-        cum_s = pd.Series(dtype=float); cum_r = pd.Series(dtype=float); out = []
-        n = min(len(hist_list), len(ref_hist_list))
-        for i in range(n):
-            cum_s = cum_s.add(hist_list[i], fill_value=0)
-            cum_r = cum_r.add(ref_hist_list[i], fill_value=0)
-            if cum_s.sum() == 0 or cum_r.sum() == 0: out.append(np.nan); continue
-            out.append(kl_dist(cum_s / cum_s.sum(), cum_r / cum_r.sum()))
+    # Small helpers for stride-aligned evaluations
+    def _calendar_week_bounds(week_idx):
+        anchor = start_date + timedelta(weeks=week_idx)
+        return anchor - timedelta(days=7), anchor - timedelta(days=1)
+
+    def _calendar_window_bounds(start_idx, end_idx):
+        window_start, _ = _calendar_week_bounds(start_idx)
+        _, window_end = _calendar_week_bounds(end_idx)
+        return window_start, window_end
+
+    def _stride_eval_indices(scfg, n_weeks):
+        stride = sampling_stride_weeks(scfg)
+        return list(range(stride - 1, n_weeks, stride))
+
+    def _sum_hist_window(hist_list, start_idx, end_idx):
+        out = pd.Series(dtype=float)
+        if not hist_list:
+            return out
+        upper = min(end_idx, len(hist_list) - 1)
+        for j in range(max(0, start_idx), upper + 1):
+            out = out.add(hist_list[j], fill_value=0)
         return out
 
-    def _roll_kl_vs(hist_list, ref_hist_list, win=4):
-        out = []; n = min(len(hist_list), len(ref_hist_list))
-        for i in range(n):
-            s = pd.Series(dtype=float); r = pd.Series(dtype=float)
-            start = max(0, i - win + 1)
-            for j in range(start, i + 1):
-                s = s.add(hist_list[j], fill_value=0)
-                r = r.add(ref_hist_list[j], fill_value=0)
-            if s.sum() == 0 or r.sum() == 0: out.append(np.nan); continue
-            out.append(kl_dist(s / s.sum(), r / r.sum()))
-        return out
+    def _filter_df_by_week_window(df, date_col, start_idx, end_idx):
+        if df.empty or date_col not in df.columns:
+            return df.iloc[0:0].copy()
+        window_start, window_end = _calendar_window_bounds(start_idx, end_idx)
+        mask = (df[date_col] >= window_start) & (df[date_col] <= window_end)
+        return df.loc[mask]
+
+    def _prepare_samples_df(weeks_list):
+        if not weeks_list:
+            return pd.DataFrame()
+        all_samples_df = pd.concat(weeks_list, ignore_index=True)
+        if args.date_field in all_samples_df.columns:
+            all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field], errors="coerce")
+        return all_samples_df
+
+    def _cum_kl_vs_stride(hist_list, ref_hist_list, scfg):
+        n = min(len(hist_list), len(ref_hist_list))
+        xs, ys = [], []
+        for end_idx in _stride_eval_indices(scfg, n):
+            sample_counts = _sum_hist_window(hist_list, 0, end_idx)
+            ref_counts = _sum_hist_window(ref_hist_list, 0, end_idx)
+            xs.append(end_idx + 1)
+            if sample_counts.sum() == 0 or ref_counts.sum() == 0:
+                ys.append(np.nan)
+                continue
+            ys.append(kl_dist(sample_counts / sample_counts.sum(), ref_counts / ref_counts.sum()))
+        return xs, ys
+
+    def _window_kl_vs_stride(hist_list, ref_hist_list, scfg, window_weeks=None):
+        n = min(len(hist_list), len(ref_hist_list))
+        stride = sampling_stride_weeks(scfg)
+        win = int(window_weeks or stride)
+        xs, ys = [], []
+        for end_idx in _stride_eval_indices(scfg, n):
+            start_idx = max(0, end_idx - win + 1)
+            sample_counts = _sum_hist_window(hist_list, start_idx, end_idx)
+            ref_counts = _sum_hist_window(ref_hist_list, start_idx, end_idx)
+            xs.append(end_idx + 1)
+            if sample_counts.sum() == 0 or ref_counts.sum() == 0:
+                ys.append(np.nan)
+                continue
+            ys.append(kl_dist(sample_counts / sample_counts.sum(), ref_counts / ref_counts.sum()))
+        return xs, ys
 
     def _axes_for_algos(n_algo: int, figsize_per_col=(7, 6)):
         """
@@ -953,6 +1053,29 @@ def main():
 
 
     auc_rows = []  # dicts: eval_type, algorithm, scenario_id, scenario_label, weeks, auc
+
+    def _record_series(eval_type, algo, scn, xs, ys, roll_window=None):
+        label = SCEN_LABELS.get(scn, f"Scenario {scn}")
+        for week_num, v in zip(xs, ys):
+            kl_rows.append({
+                "run_id": run_id,
+                "linelist_id": linelist_id,
+                "algorithm": algo,
+                "scenario_id": scn,
+                "scenario_label": label,
+                "eval_type": eval_type,
+                "roll_window": roll_window,
+                "week": int(week_num),
+                "kl": float(v),
+            })
+        auc_rows.append({
+            "eval_type": eval_type,
+            "algorithm": algo,
+            "scenario_id": scn,
+            "scenario_label": label,
+            "weeks": len(ys),
+            "auc": series_auc(ys, xs),
+        })
 
     if not args.no_plots:
         print("\nGenerating plots...")
@@ -974,7 +1097,7 @@ def main():
                     "scenario_id": scn,
                     "scenario_label": label,
                     "weeks": len(y),
-                    "auc": series_auc(y),
+                    "auc": series_auc(y, x),
                     })
             ax.grid(True, linestyle="--", alpha=0.6); ax.legend(ncol=4, fontsize=8); ax.set_xlim(left=0.9)
         figA.tight_layout()
@@ -985,73 +1108,38 @@ def main():
         # =================== FIGURE B: cumulative infections (1×3) ===================
         figB, axesB = _axes_for_algos(n_algo)
         for ax, algo in zip(axesB, algo_list):
-            ax.set_title(f"{algo}: KL vs Cumulative Infections")
+            ax.set_title(f"{algo}: KL vs Cumulative Infections (Stride-Aligned)")
             ax.set_xlabel("Week"); ax.set_ylabel("KL" if ax is axesB[0] else "")
             for scn in scenario_ids:
-                ys = _cum_kl_vs(all_weekly_hist[scn][algo], weekly_inf_hist)
+                scfg = scenario_cfg_map[scn]
+                x, ys = _cum_kl_vs_stride(all_weekly_hist[scn][algo], weekly_inf_hist, scfg)
                 if not ys:
                     continue
-                x = list(range(1, len(ys) + 1)); label = SCEN_LABELS[scn]
+                label = SCEN_LABELS[scn]
                 ax.plot(x, ys, marker=marker_map.get(scn, "o"), linestyle="-", label=label)
-                # Panel B: save KL per week
-                for i, v in enumerate(ys, start=1):
-                    kl_rows.append({
-                        "run_id": run_id,
-                        "linelist_id": linelist_id,
-                        "algorithm": algo,
-                        "scenario_id": scn,
-                        "scenario_label": label,
-                        "eval_type": "B_cumulative_infections",
-                        "roll_window": None,
-                        "week": i,
-                        "kl": float(v),
-                        })
-                auc_rows.append({
-                    "eval_type": "B_cumulative_infections",
-                    "algorithm": algo,
-                    "scenario_id": scn,
-                    "scenario_label": label,
-                    "weeks": len(ys),
-                    "auc": series_auc(ys),
-                    })
+                _record_series("B_cumulative_infections", algo, scn, x, ys)
             ax.grid(True, linestyle="--", alpha=0.6); ax.legend(ncol=4, fontsize=8); ax.set_xlim(left=0.9)
         figB.tight_layout()
         outB = out_path("B_vs_cumulative_infections_1xN.png")
         plt.savefig(outB, dpi=150); print(f"Saved: {outB}")
         plt.close(figB)
 
-        # =================== FIGURE C: rolling infections (1×N) ===================
+        # =================== FIGURE C: stride-window infections (1×N) ===================
         figC, axesC = _axes_for_algos(n_algo)
         for ax, algo in zip(axesC, algo_list):
-            ax.set_title(f"{algo}: KL vs {args.roll_win_inf}-Week Rolling Infections")
+            ax.set_title(f"{algo}: KL vs Stride-Window Infections")
             ax.set_xlabel("Week"); ax.set_ylabel("KL" if ax is axesC[0] else "")
             for scn in scenario_ids:
-                ys = _roll_kl_vs(all_weekly_hist[scn][algo], weekly_inf_hist, win=args.roll_win_inf)
+                scfg = scenario_cfg_map[scn]
+                stride_weeks = sampling_stride_weeks(scfg)
+                x, ys = _window_kl_vs_stride(
+                    all_weekly_hist[scn][algo], weekly_inf_hist, scfg, window_weeks=stride_weeks
+                )
                 if not ys:
                     continue
-                x = list(range(1, len(ys) + 1)); label = SCEN_LABELS[scn]
+                label = SCEN_LABELS[scn]
                 ax.plot(x, ys, marker=marker_map.get(scn, "o"), linestyle="-", label=label)
-                # Panel C: save KL per week (store rolling window separately)
-                for i, v in enumerate(ys, start=1):
-                    kl_rows.append({
-                        "run_id": run_id,
-                        "linelist_id": linelist_id,
-                        "algorithm": algo,
-                        "scenario_id": scn,
-                        "scenario_label": label,
-                        "eval_type": "C_rolling_infections",
-                        "roll_window": int(args.roll_win_inf),
-                        "week": i,
-                        "kl": float(v),
-                        })
-                auc_rows.append({
-                    "eval_type": f"C_rolling_infections_w{args.roll_win_inf}",
-                    "algorithm": algo,
-                    "scenario_id": scn,
-                    "scenario_label": label,
-                    "weeks": len(ys),
-                    "auc": series_auc(ys),
-                    })
+                _record_series("C_stride_window_infections", algo, scn, x, ys, roll_window=stride_weeks)
             ax.grid(True, linestyle="--", alpha=0.6); ax.legend(ncol=4, fontsize=8); ax.set_xlim(left=0.9)
         figC.tight_layout()
         outC = out_path(f"C_vs_rolling{args.roll_win_inf}_infections_1xN.png")
@@ -1107,13 +1195,11 @@ def main():
         plt.close(figD)
 
 
-        # =================== FIGURE E: Weekly Variant Prevalence Error ===================
-        print("Computing WEEKLY variant prevalence errors...")
+        # =================== FIGURES E: Per-Stride Variant Prevalence Error ===================
+        print("Computing per-stride variant prevalence errors...")
 
-        variant_diff_rows = []   # per-variant detail
-        weekly_variant_err = {algo: {} for algo in algo_list}
+        stride_variant_err = {algo: {} for algo in algo_list}
 
-        # Build set of globally observed variants in TRUE infections
         all_variants_true = {
             v
             for s in weekly_variant_counts_true
@@ -1127,272 +1213,81 @@ def main():
             if not weekly_samples_scen:
                 continue
 
+            stride_weeks = sampling_stride_weeks(scfg)
+            eval_idx = _stride_eval_indices(scfg, len(weekly_variant_counts_true))
+
             for algo in algo_list:
                 weeks_list = weekly_samples_scen.get(algo, [])
                 if not weeks_list:
                     continue
-                
-                # [STEP 1] Combine ALL samples selected by this algorithm into one big pool
-                all_samples_df = pd.concat(weeks_list, ignore_index=True)
-                
-                # Ensure date field is datetime
-                if args.date_field in all_samples_df.columns:
-                    all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field])
 
-                err_week = []
-                cur = start_date
+                all_samples_df = _prepare_samples_df(weeks_list)
+                xs, ys = [], []
 
-                # [STEP 2] Iterate through the CALENDAR weeks (matching the ground truth timeline)
-                for w_idx in range(len(weekly_variant_counts_true)):
-                    # Define the date range for this specific week
-                    prev_mon = cur - timedelta(days=7)
-                    prev_sun = cur - timedelta(days=1)
-                    
-                    # [STEP 3] Filter the combined samples to find those that belong to this calendar week
-                    # regardless of when they were actually picked by the algorithm
-                    mask = (all_samples_df[args.date_field] >= prev_mon) & \
-                        (all_samples_df[args.date_field] <= prev_sun)
-                    
-                    df_this_calendar_week = all_samples_df.loc[mask]
+                for end_idx in eval_idx:
+                    start_idx = max(0, end_idx - stride_weeks + 1)
+                    df_block = _filter_df_by_week_window(all_samples_df, args.date_field, start_idx, end_idx)
+                    true_counts = _sum_hist_window(weekly_variant_counts_true, start_idx, end_idx)
 
-                    # --- Prevalence Calculation (with Background Removal) ---
-                    
-                    # 1. Calculate Sample Prevalence (p_hat)
-                    if len(df_this_calendar_week) > 0 and "variant_label" in df_this_calendar_week.columns:
-                        counts_hat = df_this_calendar_week["variant_label"].value_counts()
-                        if "background" in counts_hat.index: 
-                            counts_hat = counts_hat.drop("background") # Remove background
-                        
+                    if len(df_block) > 0 and "variant_label" in df_block.columns:
+                        counts_hat = df_block["variant_label"].value_counts()
+                        if "background" in counts_hat.index:
+                            counts_hat = counts_hat.drop("background")
                         total_hat = float(counts_hat.sum())
                         p_hat = (counts_hat / total_hat) if total_hat > 0 else counts_hat.astype(float)
                     else:
                         p_hat = pd.Series(dtype=float)
 
-                    # 2. Calculate True Prevalence (p_true)
-                    true_counts = weekly_variant_counts_true[w_idx].copy()
                     if "background" in true_counts.index:
-                        true_counts = true_counts.drop("background") # Remove background
-
+                        true_counts = true_counts.drop("background")
                     total_true = float(true_counts.sum())
                     p_true = (true_counts / total_true) if total_true > 0 else true_counts.astype(float)
 
-                    # 3. Align and Calculate Error
                     idx = sorted(set(all_variants_true) | set(p_hat.index) | set(p_true.index))
                     p_hat_al = p_hat.reindex(idx, fill_value=0.0)
                     p_true_al = p_true.reindex(idx, fill_value=0.0)
 
-                    diff = p_hat_al - p_true_al
-                    abs_diff = diff.abs()
-                    
-                    # Use SUM for total error mass
-                    total_abs_err = abs_diff.sum()
-                    err_week.append(total_abs_err)
-                    
-                    # Move clock forward
-                    cur += timedelta(weeks=1)
+                    xs.append(end_idx + 1)
+                    ys.append((p_hat_al - p_true_al).abs().sum())
 
-                weekly_variant_err[algo][sid] = err_week
+                stride_variant_err[algo][sid] = (xs, ys)
 
-        # ---------- Plot: weekly prevalence error ----------
         figE, axesE = _axes_for_algos(n_algo)
         for ax, algo in zip(axesE, algo_list):
-            ax.set_title(f"{algo}: Weekly Variant Prevalence Error")
+            ax.set_title(f"{algo}: Per-Stride Variant Prevalence Error")
             ax.set_xlabel("Week")
             ax.set_ylabel("Total |Δ prevalence|" if ax is axesE[0] else "")
 
             for scn in scenario_ids:
-                ys = weekly_variant_err.get(algo, {}).get(scn, [])
+                x, ys = stride_variant_err.get(algo, {}).get(scn, ([], []))
                 if not ys:
                     continue
-                x = list(range(1, len(ys) + 1))
                 label = SCEN_LABELS.get(scn, f"Scenario {scn}")
                 ax.plot(x, ys, marker=marker_map.get(scn, "o"), linestyle="-", label=label)
-                # === Store per-week KL values for Plot E ===
-                for i, v in enumerate(ys, start=1):
-                    kl_rows.append({
-                        "run_id": run_id,
-                        "linelist_id": linelist_id,
-                        "algorithm": algo,
-                        "scenario_id": scn,
-                        "scenario_label": SCEN_LABELS[scn],
-                        "eval_type": "E_Weekly_Variant_Prevalence_Error",
-                        "roll_window": None,
-                        "week": i,
-                        "kl": float(v),
-                    })
-
-                # === Store AUC for Plot E ===
-                auc_rows.append({
-                    "eval_type": "E_Weekly_Variant_Prevalence_Error",
-                    "algorithm": algo,
-                    "scenario_id": scn,
-                    "scenario_label": SCEN_LABELS[scn],
-                    "weeks": len(ys),
-                    "auc": series_auc(ys),
-                })
+                _record_series("E_stride_variant_prevalence_error", algo, scn, x, ys)
 
             ax.grid(True, linestyle="--", alpha=0.6)
             ax.legend(ncol=4, fontsize=8)
             ax.set_xlim(left=0.9)
 
         figE.tight_layout()
-        outE = out_path("E_variant_prevalence_error_weekly_1xN.png")
+        outE = out_path("E_variant_prevalence_error_stride.png")
         plt.savefig(outE, dpi=150)
         print(f"Saved: {outE}")
         plt.close(figE)
 
 
-        # =================== FIGURE F: 4-Week Rolling Variant Prevalence Error ===================        
-        rolling_variant_err = {algo: {} for algo in algo_list}
-        ROLL_WIN = 4  # 4-week window
-
-        for scfg in SCENARIOS:
-            sid = scfg["id"]
-            weekly_samples_scen = all_weekly_samples.get(sid, {})
-            if not weekly_samples_scen:
-                continue
-
-            for algo in algo_list:
-                weeks_list = weekly_samples_scen.get(algo, [])
-                if not weeks_list:
-                    continue
-                
-                # [STEP 1] Combine samples (same as Fig E)
-                all_samples_df = pd.concat(weeks_list, ignore_index=True)
-                if args.date_field in all_samples_df.columns:
-                    all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field])
-
-                err_week_rolling = []
-                
-                # [STEP 2] Iterate through calendar weeks
-                # w_idx corresponds to the "current" week in the rolling window
-                for w_idx in range(len(weekly_variant_counts_true)):
-                    
-                    # --- Determine Date Range for Rolling Window ---
-                    # The window includes the current week (w_idx) and up to 3 previous weeks.
-                    # Start index for the window:
-                    start_idx = max(0, w_idx - ROLL_WIN + 1)
-                    
-                    # Calculate strict dates to match the ground truth weeks
-                    # (Assuming weekly_variant_counts_true starts exactly at args.start_date)
-                    window_start_date = start_date + timedelta(weeks=start_idx)
-                    window_end_date   = start_date + timedelta(weeks=w_idx) + timedelta(days=6)
-                    
-                    # --- Filter Samples in Window ---
-                    mask = (all_samples_df[args.date_field] >= window_start_date) & \
-                           (all_samples_df[args.date_field] <= window_end_date)
-                    df_rolling = all_samples_df.loc[mask]
-
-                    # --- Sum True Counts in Window ---
-                    true_counts_rolling = pd.Series(dtype=float)
-                    for k in range(start_idx, w_idx + 1):
-                        true_counts_rolling = true_counts_rolling.add(weekly_variant_counts_true[k], fill_value=0)
-
-                    # --- Prevalence Calculation (With Background Removal) ---
-                    
-                    # 1. Rolling Sample Prevalence
-                    if len(df_rolling) > 0 and "variant_label" in df_rolling.columns:
-                        counts_hat = df_rolling["variant_label"].value_counts()
-                        if "background" in counts_hat.index: 
-                            counts_hat = counts_hat.drop("background")
-                        
-                        total_hat = float(counts_hat.sum())
-                        p_hat = (counts_hat / total_hat) if total_hat > 0 else counts_hat.astype(float)
-                    else:
-                        p_hat = pd.Series(dtype=float)
-
-                    # 2. Rolling True Prevalence
-                    if "background" in true_counts_rolling.index:
-                        true_counts_rolling = true_counts_rolling.drop("background")
-
-                    total_true = float(true_counts_rolling.sum())
-                    p_true = (true_counts_rolling / total_true) if total_true > 0 else true_counts_rolling.astype(float)
-
-                    # 3. Error Calculation (TVD / Sum Abs Diff)
-                    idx = sorted(set(all_variants_true) | set(p_hat.index) | set(p_true.index))
-                    p_hat_al = p_hat.reindex(idx, fill_value=0.0)
-                    p_true_al = p_true.reindex(idx, fill_value=0.0)
-                    
-                    total_abs_err = (p_hat_al - p_true_al).abs().sum()
-                    err_week_rolling.append(total_abs_err)
-
-                rolling_variant_err[algo][sid] = err_week_rolling
-
-        # ---------- Plot Figure F ----------
-        figF, axesF = _axes_for_algos(n_algo)
-        for ax, algo in zip(axesF, algo_list):
-            ax.set_title(f"{algo}: 4-Week Rolling Prevalence Error")
-            ax.set_xlabel("Week")
-            ax.set_ylabel("Sum Abs Diff (TVD)" if ax is axesF[0] else "")
-
-            for scn in scenario_ids:
-                ys = rolling_variant_err.get(algo, {}).get(scn, [])
-                if not ys:
-                    continue
-                x = list(range(1, len(ys) + 1))
-                label = SCEN_LABELS.get(scn, f"Scenario {scn}")
-                ax.plot(x, ys, marker=marker_map.get(scn, "o"), linestyle="-", label=label)
-                # === Store per-week KL values for Plot F ===
-                for i, v in enumerate(ys, start=1):
-                    kl_rows.append({
-                        "run_id": run_id,
-                        "linelist_id": linelist_id,
-                        "algorithm": algo,
-                        "scenario_id": scn,
-                        "scenario_label": SCEN_LABELS[scn],
-                        "eval_type": "F_4-Week_Rolling_Prevalence_Error",
-                        "roll_window": None,
-                        "week": i,
-                        "kl": float(v),
-                    })
-
-                # === Store AUC for Plot F ===
-                auc_rows.append({
-                    "eval_type": "F_4-Week_Rolling_Prevalence_Error",
-                    "algorithm": algo,
-                    "scenario_id": scn,
-                    "scenario_label": SCEN_LABELS[scn],
-                    "weeks": len(ys),
-                    "auc": series_auc(ys),
-                })
-
-            ax.grid(True, linestyle="--", alpha=0.6)
-            ax.legend(ncol=4, fontsize=8)
-            ax.set_xlim(left=0.9)
-
-        figF.tight_layout()
-        outF = out_path("F_variant_prevalence_error_rolling4_1xN.png")
-        plt.savefig(outF, dpi=150)
-        print(f"Saved: {outF}")
-        plt.close(figF)
-
-
-        # =================== FIGURE G: Weekly Component Coverage ===================
-        print("Computing weekly component coverage...")
+        # =================== FIGURES F: Per-Stride Component Coverage ===================
+        print("Computing per-stride component coverage...")
         COMPONENT_COL = "component_id"
 
         if COMPONENT_COL in line_df.columns:
-            # --- Precompute weekly linelist unique components (denominator) ---
             weeks_n = len(weekly_ll_hist)
-            weekly_ll_components = []
-            cur = start_date
-            for w_idx in range(weeks_n):
-                prev_mon = cur - timedelta(days=7)
-                prev_sun = cur - timedelta(days=1)
-                mask_ll = (
-                    (line_df[args.date_field] >= prev_mon) &
-                    (line_df[args.date_field] <= prev_sun)
-                )
-                weekly_ll_components.append(
-                    line_df.loc[mask_ll, COMPONENT_COL].dropna().nunique()
-                )
-                cur += timedelta(weeks=1)
 
             def _safe_ratio(num, den):
                 return (num / den) if (den is not None and den > 0) else np.nan
 
-            # --- Weekly coverage per scenario x algorithm ---
-            weekly_comp_cov = {algo: {} for algo in algo_list}
+            stride_comp_cov = {algo: {} for algo in algo_list}
 
             for scfg in SCENARIOS:
                 sid = scfg["id"]
@@ -1400,161 +1295,38 @@ def main():
                 if not weekly_samples_scen:
                     continue
 
+                stride_weeks = sampling_stride_weeks(scfg)
+                eval_idx = _stride_eval_indices(scfg, weeks_n)
+
                 for algo in algo_list:
                     weeks_list = weekly_samples_scen.get(algo, [])
                     if not weeks_list:
                         continue
 
-                    # IMPORTANT: combine ALL samples for this scenario+algo
-                    # so backfilled samples are available to any week
-                    all_samples_df = pd.concat(weeks_list, ignore_index=True)
+                    all_samples_df = _prepare_samples_df(weeks_list)
+                    xs, ys = [], []
+                    for end_idx in eval_idx:
+                        start_idx = max(0, end_idx - stride_weeks + 1)
+                        df_samples = _filter_df_by_week_window(all_samples_df, args.date_field, start_idx, end_idx)
+                        df_truth = _filter_df_by_week_window(line_df, args.date_field, start_idx, end_idx)
 
-                    # Ensure date column is datetime
-                    if args.date_field in all_samples_df.columns:
-                        all_samples_df[args.date_field] = pd.to_datetime(
-                            all_samples_df[args.date_field]
-                        )
+                        num = df_samples[COMPONENT_COL].dropna().nunique()
+                        den = df_truth[COMPONENT_COL].dropna().nunique()
+                        xs.append(end_idx + 1)
+                        ys.append(_safe_ratio(num, den))
 
-                    cov_series = []
-                    cur = start_date
-                    for w_idx in range(weeks_n):
-                        prev_mon = cur - timedelta(days=7)
-                        prev_sun = cur - timedelta(days=1)
+                    stride_comp_cov[algo][sid] = (xs, ys)
 
-                        # Numerator: unique component_ids among *all* samples
-                        # whose specimen date is in this calendar week.
-                        mask_s = (
-                            (all_samples_df[args.date_field] >= prev_mon) &
-                            (all_samples_df[args.date_field] <= prev_sun)
-                        )
-                        num = all_samples_df.loc[mask_s, COMPONENT_COL].dropna().nunique()
-
-                        # Denominator: unique component_ids in linelist for this week
-                        den = weekly_ll_components[w_idx]
-
-                        cov_series.append(_safe_ratio(num, den))
-                        cur += timedelta(weeks=1)
-
-                    weekly_comp_cov[algo][sid] = cov_series
-
-            # --- Plot weekly coverage (Figure G) ---
             figG, axesG = _axes_for_algos(n_algo)
             for ax, algo in zip(axesG, algo_list):
-                ax.set_title(f"{algo}: Weekly Component Coverage")
+                ax.set_title(f"{algo}: Per-Stride Component Coverage")
                 ax.set_xlabel("Week")
                 ax.set_ylabel("% components covered" if ax is axesG[0] else "")
 
                 for scn in scenario_ids:
-                    ys = weekly_comp_cov.get(algo, {}).get(scn, [])
+                    x, ys = stride_comp_cov.get(algo, {}).get(scn, ([], []))
                     if not ys:
                         continue
-                    x = list(range(1, len(ys) + 1))
-                    ax.plot(
-                        x,
-                        np.array(ys) * 100.0,  # convert to %
-                        marker=marker_map.get(scn, "o"),
-                        linestyle="-",
-                        label=SCEN_LABELS.get(scn, f"Scenario {scn}")
-                    )
-
-                    for i, v in enumerate(ys, start=1):
-                        kl_rows.append({
-                            "run_id": run_id,
-                            "linelist_id": linelist_id,
-                            "algorithm": algo,
-                            "scenario_id": scn,
-                            "scenario_label": SCEN_LABELS.get(scn, f"Scenario {scn}"),
-                            "eval_type": "G_weekly_component_coverage",
-                            "roll_window": None,
-                            "week": i,
-                            # convention: KL column stores the metric; here v = fraction coverage
-                            "kl": float(v),
-                        })
-
-                    # --- Store AUC for coverage series (lower is worse coverage, but consistent ranking) ---
-                    auc_rows.append({
-                        "eval_type": "G_weekly_component_coverage",
-                        "algorithm": algo,
-                        "scenario_id": scn,
-                        "scenario_label": SCEN_LABELS.get(scn, f"Scenario {scn}"),
-                        "weeks": len(ys),
-                        "auc": series_auc(ys),
-                    })
-
-
-                ax.grid(True, linestyle="--", alpha=0.6)
-                ax.legend(ncol=4, fontsize=8)
-                ax.set_xlim(left=0.9)
-
-            figG.tight_layout()
-            outG = out_path("G_component_coverage_weekly_1xN.png")
-            plt.savefig(outG, dpi=150)
-            print(f"Saved: {outG}")
-            plt.close(figG)
-
-            # =================== FIGURE H: 4-Week Rolling Component Coverage ===================
-            print("Computing 4-week rolling component coverage...")
-
-            ROLL_WIN_CC = 4
-            rolling_comp_cov = {algo: {} for algo in algo_list}
-
-            for scfg in SCENARIOS:
-                sid = scfg["id"]
-                weekly_samples_scen = all_weekly_samples.get(sid, {})
-                if not weekly_samples_scen:
-                    continue
-
-                for algo in algo_list:
-                    weeks_list = weekly_samples_scen.get(algo, [])
-                    if not weeks_list:
-                        continue
-
-                    all_samples_df = pd.concat(weeks_list, ignore_index=True)
-                    if args.date_field in all_samples_df.columns:
-                        all_samples_df[args.date_field] = pd.to_datetime(
-                            all_samples_df[args.date_field]
-                        )
-
-                    cov_series = []
-                    for w_idx in range(weeks_n):
-                        # rolling indices
-                        start_idx = max(0, w_idx - ROLL_WIN_CC + 1)
-
-                        # rolling calendar window [start_idx .. w_idx]
-                        window_start_date = start_date + timedelta(weeks=start_idx)
-                        window_end_date   = start_date + timedelta(weeks=w_idx) + timedelta(days=6)
-
-                        # Numerator: unique component_ids among *all* samples
-                        # whose specimen date is in this rolling window.
-                        mask_s = (
-                            (all_samples_df[args.date_field] >= window_start_date) &
-                            (all_samples_df[args.date_field] <= window_end_date)
-                        )
-                        num = all_samples_df.loc[mask_s, COMPONENT_COL].dropna().nunique()
-
-                        # Denominator: unique component_ids in linelist in same window
-                        mask_ll = (
-                            (line_df[args.date_field] >= window_start_date) &
-                            (line_df[args.date_field] <= window_end_date)
-                        )
-                        den = line_df.loc[mask_ll, COMPONENT_COL].dropna().nunique()
-
-                        cov_series.append(_safe_ratio(num, den))
-
-                    rolling_comp_cov[algo][sid] = cov_series
-
-            # --- Plot rolling coverage (Figure H) ---
-            figH, axesH = _axes_for_algos(n_algo)
-            for ax, algo in zip(axesH, algo_list):
-                ax.set_title(f"{algo}: {ROLL_WIN_CC}-Week Rolling Component Coverage")
-                ax.set_xlabel("Week")
-                ax.set_ylabel("% components covered" if ax is axesH[0] else "")
-
-                for scn in scenario_ids:
-                    ys = rolling_comp_cov.get(algo, {}).get(scn, [])
-                    if not ys:
-                        continue
-                    x = list(range(1, len(ys) + 1))
                     ax.plot(
                         x,
                         np.array(ys) * 100.0,
@@ -1562,41 +1334,17 @@ def main():
                         linestyle="-",
                         label=SCEN_LABELS.get(scn, f"Scenario {scn}")
                     )
-
-                    # --- Store per-week rolling component coverage rows ---
-                    for i, v in enumerate(ys, start=1):
-                        kl_rows.append({
-                            "run_id": run_id,
-                            "linelist_id": linelist_id,
-                            "algorithm": algo,
-                            "scenario_id": scn,
-                            "scenario_label": SCEN_LABELS.get(scn, f"Scenario {scn}"),
-                            "eval_type": "H_rolling_component_coverage",
-                            "roll_window": 4,             # fixed window in your code
-                            "week": i,
-                            "kl": float(v),
-                        })
-
-                    # --- Store AUC for the rolling series ---
-                    auc_rows.append({
-                        "eval_type": "H_rolling_component_coverage",
-                        "algorithm": algo,
-                        "scenario_id": scn,
-                        "scenario_label": SCEN_LABELS.get(scn, f"Scenario {scn}"),
-                        "weeks": len(ys),
-                        "auc": series_auc(ys),
-                    })
-
+                    _record_series("F_stride_component_coverage", algo, scn, x, ys)
 
                 ax.grid(True, linestyle="--", alpha=0.6)
                 ax.legend(ncol=4, fontsize=8)
                 ax.set_xlim(left=0.9)
 
-            figH.tight_layout()
-            outH = out_path("H_component_coverage_rolling4_1xN.png")
-            plt.savefig(outH, dpi=150)
-            print(f"Saved: {outH}")
-            plt.close(figH)
+            figG.tight_layout()
+            outG = out_path("F_component_coverage_stride.png")
+            plt.savefig(outG, dpi=150)
+            print(f"Saved: {outG}")
+            plt.close(figG)
 
         # =================== FIGURES I, J, K, L: Coverage by Tree Size ===================
         if "contact_pid" in line_df.columns:
@@ -1616,7 +1364,7 @@ def main():
                 (1000, "L", "> 1000")
             ]
             
-            # Structure: results[threshold][algo][scenario] = [scores per week]
+            # Structure: results[threshold][algo][scenario] = (week_numbers, scores)
             results_by_thresh = {t: {algo: {} for algo in algo_list} for t, _, _ in THRESHOLDS}
 
             # --- Compute Scores ---
@@ -1626,47 +1374,38 @@ def main():
                 if not weekly_samples_scen:
                     continue
 
+                eval_idx = _stride_eval_indices(scfg, len(weekly_ll_hist))
+
                 for algo in algo_list:
                     weeks_list = weekly_samples_scen.get(algo, [])
                     if not weeks_list:
                         continue
 
-                    # Consolidate samples
-                    all_samples_df = pd.concat(weeks_list, ignore_index=True)
-                    if args.date_field in all_samples_df.columns:
-                        all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field])
+                    all_samples_df = _prepare_samples_df(weeks_list)
 
-                    # Prepare lists for each threshold
-                    series_map = {t: [] for t, _, _ in THRESHOLDS}
+                    series_map = {t: ([], []) for t, _, _ in THRESHOLDS}
                     
-                    cur_date = start_date
-                    for w_idx in range(len(weekly_ll_hist)):
-                        week_end_date = cur_date + timedelta(days=6)
+                    for end_idx in eval_idx:
+                        _, week_end_date = _calendar_week_bounds(end_idx)
                         
-                        # 1. Identify S (Samples up to now)
                         mask_sample = all_samples_df[args.date_field] <= week_end_date
                         s_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
                         s_ids = set(all_samples_df.loc[mask_sample, s_col].astype(str))
                         
-                        # 2. Identify Full Pt (Population up to now)
                         mask_pop = line_df[args.date_field] <= week_end_date
                         pt_ids_all = set(line_df.loc[mask_pop, "sim_pid"].astype(str))
                         
-                        # 3. Calculate Score for each Threshold
                         for thresh, _, _ in THRESHOLDS:
-                            # Filter Pt based on component size
-                            # (We only care about covering people in BIG trees)
                             pt_ids_filtered = {
                                 u for u in pt_ids_all 
                                 if pid_sizes.get(u, 1) > thresh
                             }
                             
                             score = calculate_coverage_score(pt_ids_filtered, s_ids, adj_graph)
-                            series_map[thresh].append(score)
-                        
-                        cur_date += timedelta(weeks=1)
+                            xs, ys = series_map[thresh]
+                            xs.append(end_idx + 1)
+                            ys.append(score)
 
-                    # Save to main results dict
                     for thresh, _, _ in THRESHOLDS:
                         results_by_thresh[thresh][algo][sid] = series_map[thresh]
 
@@ -1676,15 +1415,14 @@ def main():
                 
                 fig, axes = _axes_for_algos(n_algo)
                 for ax, algo in zip(axes, algo_list):
-                    ax.set_title(f"{algo}: Coverage ({label_suffix})")
+                    ax.set_title(f"{algo}: Stride-Aligned Coverage ({label_suffix})")
                     ax.set_xlabel("Week")
                     ax.set_ylabel("Score" if ax is axes[0] else "")
 
                     for scn in scenario_ids:
-                        ys = results_by_thresh[thresh].get(algo, {}).get(scn, [])
+                        x, ys = results_by_thresh[thresh].get(algo, {}).get(scn, ([], []))
                         if not ys:
                             continue
-                        x = list(range(1, len(ys) + 1))
                         
                         ax.plot(
                             x, ys,
@@ -1695,28 +1433,7 @@ def main():
 
                         # Store Metrics (Naming convention: Letter_Label)
                         eval_type = f"{letter}_coverage_size_{thresh}"
-                        for i, v in enumerate(ys, start=1):
-                            kl_rows.append({
-                                "run_id": run_id,
-                                "linelist_id": linelist_id,
-                                "algorithm": algo,
-                                "scenario_id": scn,
-                                "scenario_label": SCEN_LABELS.get(scn, f"Scenario {scn}"),
-                                "eval_type": eval_type,
-                                "roll_window": None,
-                                "week": i,
-                                "kl": float(v),
-                            })
-                        
-                        # Store AUC
-                        auc_rows.append({
-                            "eval_type": eval_type,
-                            "algorithm": algo,
-                            "scenario_id": scn,
-                            "scenario_label": SCEN_LABELS.get(scn, f"Scenario {scn}"),
-                            "weeks": len(ys),
-                            "auc": series_auc(ys),
-                        })
+                        _record_series(eval_type, algo, scn, x, ys)
 
                     ax.grid(True, linestyle="--", alpha=0.6)
                     ax.legend(ncol=4, fontsize=8)
@@ -1746,32 +1463,28 @@ def main():
                 if not weekly_samples_scen:
                     continue
 
+                eval_idx = _stride_eval_indices(scfg, len(weekly_ll_hist))
+
                 for algo in algo_list:
                     weeks_list = weekly_samples_scen.get(algo, [])
                     if not weeks_list:
                         continue
 
-                    # Consolidate all samples
-                    all_samples_df = pd.concat(weeks_list, ignore_index=True)
-                    if args.date_field in all_samples_df.columns:
-                        all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field])
+                    all_samples_df = _prepare_samples_df(weeks_list)
 
+                    xs = []
                     score_series = []
                     
-                    for w_idx in range(len(weekly_ll_hist)):
-                        # Define the 8-week rolling window dates
-                        start_idx = max(0, w_idx - ROLL_WIN_TREE + 1)
-                        window_start_date = start_date + timedelta(weeks=start_idx)
-                        window_end_date = start_date + timedelta(weeks=w_idx) + timedelta(days=6)
+                    for end_idx in eval_idx:
+                        start_idx = max(0, end_idx - ROLL_WIN_TREE + 1)
+                        window_start_date, window_end_date = _calendar_window_bounds(start_idx, end_idx)
                         
-                        # 1. Identify Pt (Population infected WITHIN this 8-week window)
                         mask_pop = (
                             (line_df[args.date_field] >= window_start_date) & 
                             (line_df[args.date_field] <= window_end_date)
                         )
                         pt_ids_window = set(line_df.loc[mask_pop, "sim_pid"].astype(str))
                         
-                        # 2. Identify S (Samples collected WITHIN this 8-week window)
                         mask_sample = (
                             (all_samples_df[args.date_field] >= window_start_date) & 
                             (all_samples_df[args.date_field] <= window_end_date)
@@ -1779,24 +1492,23 @@ def main():
                         s_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
                         s_ids_window = set(all_samples_df.loc[mask_sample, s_col].astype(str))
                         
-                        # 3. Calculate Score
                         score = calculate_coverage_score(pt_ids_window, s_ids_window, adj_graph)
+                        xs.append(end_idx + 1)
                         score_series.append(score)
 
-                    rolling_tree_scores[algo][sid] = score_series
+                    rolling_tree_scores[algo][sid] = (xs, score_series)
 
             # --- Plot Figure M ---
             figM, axesM = _axes_for_algos(n_algo)
             for ax, algo in zip(axesM, algo_list):
-                ax.set_title(f"{algo}: 8-Week Rolling Tree Coverage")
+                ax.set_title(f"{algo}: 8-Week Rolling Tree Coverage (Stride-Aligned)")
                 ax.set_xlabel("Week")
                 ax.set_ylabel("Coverage Score (0-1)" if ax is axesM[0] else "")
 
                 for scn in scenario_ids:
-                    ys = rolling_tree_scores.get(algo, {}).get(scn, [])
+                    x, ys = rolling_tree_scores.get(algo, {}).get(scn, ([], []))
                     if not ys:
                         continue
-                    x = list(range(1, len(ys) + 1))
                     
                     ax.plot(
                         x, ys,
@@ -1805,29 +1517,7 @@ def main():
                         label=SCEN_LABELS.get(scn, f"Scenario {scn}")
                     )
 
-                    # Store Metrics
-                    for i, v in enumerate(ys, start=1):
-                        kl_rows.append({
-                            "run_id": run_id,
-                            "linelist_id": linelist_id,
-                            "algorithm": algo,
-                            "scenario_id": scn,
-                            "scenario_label": SCEN_LABELS.get(scn, f"Scenario {scn}"),
-                            "eval_type": "M_8_week_rolling_tree_coverage",
-                            "roll_window": 8,
-                            "week": i,
-                            "kl": float(v), # Score mapped to KL column for CSV consistency
-                        })
-                    
-                    # Store AUC
-                    auc_rows.append({
-                        "eval_type": "M_8_week_rolling_tree_coverage",
-                        "algorithm": algo,
-                        "scenario_id": scn,
-                        "scenario_label": SCEN_LABELS.get(scn, f"Scenario {scn}"),
-                        "weeks": len(ys),
-                        "auc": series_auc(ys),
-                    })
+                    _record_series("M_8_week_rolling_tree_coverage", algo, scn, x, ys, roll_window=8)
 
                 ax.grid(True, linestyle="--", alpha=0.6)
                 ax.legend(ncol=4, fontsize=8)
@@ -1847,7 +1537,7 @@ def main():
             # 1. Get unique, valid age groups from the linelist
             age_groups = sorted([ag for ag in line_df["age_group"].dropna().unique() if str(ag) != "nan"])
             
-            # Data structure: age_cov[age_group][algo][scenario_id] = [weekly_scores]
+            # Data structure: age_cov[age_group][algo][scenario_id] = (week_numbers, scores)
             age_cov = {ag: {algo: {} for algo in algo_list} for ag in age_groups}
 
             # Ensure adj_graph is available
@@ -1861,93 +1551,69 @@ def main():
                 if not weekly_samples_scen:
                     continue
 
+                eval_idx = _stride_eval_indices(scfg, len(weekly_ll_hist))
+
                 for algo in algo_list:
                     weeks_list = weekly_samples_scen.get(algo, [])
                     if not weeks_list:
                         continue
 
-                    all_samples_df = pd.concat(weeks_list, ignore_index=True)
-                    if args.date_field in all_samples_df.columns:
-                        all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field])
+                    all_samples_df = _prepare_samples_df(weeks_list)
 
-                    # Prepare tracking lists for this specific algo & scenario
-                    series_map = {ag: [] for ag in age_groups}
+                    series_map = {ag: ([], []) for ag in age_groups}
 
-                    cur_date = start_date
-                    for w_idx in range(len(weekly_ll_hist)):
-                        week_end_date = cur_date + timedelta(days=6)
+                    for end_idx in eval_idx:
+                        _, week_end_date = _calendar_week_bounds(end_idx)
 
-                        # Set S: All samples collected up to this week
                         mask_sample = all_samples_df[args.date_field] <= week_end_date
                         s_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
                         s_ids = set(all_samples_df.loc[mask_sample, s_col].astype(str))
 
-                        # Set Pt Base: All population infected up to this week
                         mask_pop = line_df[args.date_field] <= week_end_date
                         pop_this_week = line_df.loc[mask_pop]
 
-                        # Calculate Coverage for EACH Age Group
                         for ag in age_groups:
-                            # Filter Pt strictly to this age group
                             pt_ag_ids = set(pop_this_week.loc[pop_this_week["age_group"] == ag, "sim_pid"].astype(str))
                             
                             score = calculate_coverage_score(pt_ag_ids, s_ids, adj_graph)
-                            series_map[ag].append(score)
+                            xs, ys = series_map[ag]
+                            xs.append(end_idx + 1)
+                            ys.append(score)
 
-                        cur_date += timedelta(weeks=1)
-
-                    # Save series and log to CSV rows
                     for ag in age_groups:
                         age_cov[ag][algo][sid] = series_map[ag]
                         
-                        # Clean age group name for CSV column
                         ag_clean_csv = ag.replace(' ', '_').replace('/', '_').replace('(', '').replace(')', '')
                         eval_type = f"N_equity_{ag_clean_csv}"
                         
-                        ys = series_map[ag]
-                        
-                        # Log per-week for KL series
-                        for i, v in enumerate(ys, start=1):
-                            kl_rows.append({
-                                "run_id": run_id,
-                                "linelist_id": linelist_id,
-                                "algorithm": algo,
-                                "scenario_id": sid,
-                                "scenario_label": SCEN_LABELS.get(sid, f"Scenario {sid}"),
-                                "eval_type": eval_type,
-                                "roll_window": None,
-                                "week": i,
-                                "kl": float(v), # Score mapped to kl column
-                            })
-                            
-                        # Log AUC for rankings
-                        auc_rows.append({
-                            "eval_type": eval_type,
-                            "algorithm": algo,
-                            "scenario_id": sid,
-                            "scenario_label": SCEN_LABELS.get(sid, f"Scenario {sid}"),
-                            "weeks": len(ys),
-                            "auc": series_auc(ys),
-                        })
+                        xs, ys = series_map[ag]
+                        _record_series(eval_type, algo, sid, xs, ys)
 
             # --- Plot Figure N (5 Separate Heatmaps) ---
             for ag in age_groups:
                 matrix = []
                 valid_row_labels = []
+                all_eval_weeks = sorted({
+                    week_num
+                    for algo in algo_list
+                    for sid in scenario_ids
+                    for week_num in age_cov[ag][algo].get(sid, ([], []))[0]
+                })
                 
                 # Build rows: grouped by Algorithm, then Scenario
                 for algo in algo_list:
                     for sid in scenario_ids:
-                        ys = age_cov[ag][algo].get(sid, [])
+                        xs, ys = age_cov[ag][algo].get(sid, ([], []))
                         if ys:
-                            matrix.append(ys)
+                            row = pd.Series(ys, index=xs, dtype=float).reindex(all_eval_weeks)
+                            matrix.append(row)
                             valid_row_labels.append(f"{algo} | {SCEN_LABELS.get(sid, f'Scen {sid}')}")
                 
-                if not matrix:
+                if not matrix or not all_eval_weeks:
                     continue
                     
                 # Convert to DataFrame for Seaborn
-                matrix_df = pd.DataFrame(matrix, index=valid_row_labels, columns=range(1, len(matrix[0]) + 1))
+                matrix_df = pd.DataFrame(matrix, index=valid_row_labels, columns=all_eval_weeks)
                 
                 figN, axN = plt.subplots(figsize=(12, max(6, len(valid_row_labels) * 0.4)))
                 
@@ -1962,7 +1628,7 @@ def main():
                     cbar_kws={'label': 'Cumulative Tree Coverage Score (0.0 - 1.0)'}
                 )
                 
-                axN.set_title(f"Longitudinal Equity: {ag}\nHow close is the average {ag} to a sampled individual over time?", fontsize=14)
+                axN.set_title(f"Longitudinal Equity: {ag}\nHow close is the average {ag} to a sampled individual at stride checkpoints?", fontsize=14)
                 axN.set_xlabel("Week", fontsize=12)
                 axN.set_ylabel("Algorithm | Scenario", fontsize=12)
                 
@@ -1984,7 +1650,7 @@ def main():
     else:
         print("\n--no-plots flag detected. Skipping plot generation.")
     
-    # ------------------- Save per-week KL series for uncertainty bands -------------------
+    # ------------------- Save evaluation series for uncertainty bands -------------------
     kl_df = pd.DataFrame(kl_rows)
     kl_out = out_path("KL_series.csv")
     kl_df.to_csv(kl_out, index=False)
