@@ -695,11 +695,12 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
             eff_frac = ov_frac if ov_frac is not None else scfg["batch_frac"]
             eff_cap  = ov_cap  if ov_cap  is not None else scfg["batch_cap"]
             eff_mpg  = ov_mpg  if ov_mpg  is not None else scfg["min_per_group"]
+            budget_multiplier = stride_weeks if scfg.get("sampling_mode") == "stride" else 1
 
             if ov_fixed is not None:
-                batch_size = int(min(max(0, ov_fixed), len(pool_df)))
+                batch_size = int(min(max(0, ov_fixed * budget_multiplier), len(pool_df)))
             else:
-                batch_size = int(min(eff_frac * len(pool_df), eff_cap))
+                batch_size = int(min(eff_frac * len(pool_df), eff_cap * budget_multiplier))
 
             min_per_group = int(max(0, eff_mpg))
 
