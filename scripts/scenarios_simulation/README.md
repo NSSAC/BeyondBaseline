@@ -23,7 +23,7 @@ It loads a synthetic linelist and population file, runs all 8 scenarios in one g
 ```bash
 python3 run_all_scenarios.py \
   --linelist ../data/linelist.csv.xz \
-  --population ../../va_persontrait_epihiper.txt \
+  --population ../../va_persontrait_epihiper.csv \
   --infections ../data/linelist_allevents.csv.xz \
   --outdir ./result \
   --batch-size 100 \
@@ -38,9 +38,25 @@ python3 run_all_scenarios.py \
 ```bash
 python3 run_replicates.py \
   --replicates-dir ../data/replicate \
-  --population ../../va_persontrait_epihiper.txt
+  --population ../../va_persontrait_epihiper.csv
 
+# if you want uncertainty
 python3 plot_kl_uncertainty.py --root scenario_runs --outdir result_graphs
+```
+
+# Run lasso test with:
+```bash
+python3 lasso_test_greedy.py \
+  --linelist ../results/replicate_0/linelist.csv.xz \
+  --population va_persontrait_epihiper.csv \
+  --infections ../results/replicate_0/linelist_allevents.csv.xz \
+  --stratifiers age race county sex ses \
+  --outdir lasso_greedy_50-500 \
+  --batch-size 100 \
+  --min-group-size 50 \
+  --max-group-size 500 \
+  --step-group-size 50 \
+  --seed 42
 ```
 
 # Run lite version with:
