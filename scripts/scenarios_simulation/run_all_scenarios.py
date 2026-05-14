@@ -395,7 +395,7 @@ def build_weekly_infections(infections_path, pop_df, start_date, num_weeks_ref, 
         weekly_inf_hist.append(inf.loc[mask, "group"].value_counts())
         cur += timedelta(weeks=1)
 
-    return weekly_inf_hist
+    return weekly_inf_hist, inf
 
 def build_weekly_variant_counts(
     infections_path,
