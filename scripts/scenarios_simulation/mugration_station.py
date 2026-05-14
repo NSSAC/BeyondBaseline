@@ -1,6 +1,8 @@
 import json
 import networkx as nx
 from collections import defaultdict, Counter
+import pandas as pd
+
 
 def build_directed_graph(df: pd.DataFrame, pid_col="sim_pid", contact_col="contact_pid") -> nx.DiGraph:
     """
