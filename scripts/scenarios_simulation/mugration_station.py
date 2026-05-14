@@ -13,8 +13,12 @@ def build_directed_graph(df: pd.DataFrame, pid_col="sim_pid", contact_col="conta
     if pid_col not in df.columns or contact_col not in df.columns:
         return G
     
-    pids = df[pid_col].astype(str)
-    contacts = df[contact_col].astype(str)
+    df["sim_node"]= df[pid_col].astype(str) +"_"+ df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
+    df["contact_node"]= df[contact_col].astype(str) +"_"+ df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
+
+    
+    pids = df["sim_node"].astype(str)
+    contacts = df["contact_node"].astype(str)
     edges = zip(contacts, pids)
     
     # Valid directed edges (ignore -1, nan, or self-loops)
@@ -22,7 +26,15 @@ def build_directed_graph(df: pd.DataFrame, pid_col="sim_pid", contact_col="conta
     G.add_edges_from(valid_edges)
     return G
 
-
+def _prepare_samples_df(weeks_list):
+    if not weeks_list:
+        return pd.DataFrame()
+    all_samples_df = pd.concat(weeks_list, ignore_index=True)
+    all_samples_df["sim_node"]= all_samples_df[pid_col].astype(str) +"_"+ all_samples_df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
+    all_samples_df["contact_node"]= all_samples_df[contact_col].astype(str) +"_"+ all_samples_df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
+    if args.date_field in all_samples_df.columns:
+        all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field], errors="coerce")
+    return all_samples_df
 
 def simulate_inference_and_matrix(G, known_tip_states, alphabet, simulation_duration_years):
     """

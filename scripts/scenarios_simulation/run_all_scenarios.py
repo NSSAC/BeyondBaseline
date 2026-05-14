@@ -6,6 +6,7 @@ import time
 from collections import deque
 from datetime import timedelta
 from pathlib import Path
+from scipy.stats import pearsonr
 
 import numpy as np
 import pandas as pd
@@ -907,13 +908,7 @@ def main():
     algo_list  = list(ALG.keys())
     n_algo    = len(algo_list)
 
-    def _prepare_samples_df(weeks_list):
-        if not weeks_list:
-            return pd.DataFrame()
-        all_samples_df = pd.concat(weeks_list, ignore_index=True)
-        if args.date_field in all_samples_df.columns:
-            all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field], errors="coerce")
-        return all_samples_df
+
     
     for scfg in SCENARIOS:
         print(f"\n=== Running {scfg['name']} ===")
@@ -1010,12 +1005,12 @@ def main():
                                 continue
 
                             # Combine the in-memory weeks to get the sampled nodes
-                            all_samples_df = _prepare_samples_df(weeks_list)
+                            all_samples_df = mugration_station._prepare_samples_df(weeks_list)
                             if all_samples_df.empty:
                                 continue
 
                             # 1. Prepare Tip States
-                            s_pid_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
+                            s_pid_col = "sim_node"
                             
                             if "county" in all_samples_df.columns:
                                 known_tips = all_samples_df.set_index(s_pid_col)["county"].to_dict()
@@ -1034,10 +1029,10 @@ def main():
                             sample_prefix = output_basename if output_basename else run_id
                             mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{sid}_{algo}.json")
 
-                            algo_normalized_matrix = align_and_normalize_matrix(mug_res['county']["transition_matrix"], mug_res['county']["alphabet"], county_names)
+                            algo_normalized_matrix = mugration_station.align_and_normalize_matrix(mug_res['county']["transition_matrix"], mug_res['county']["alphabet"], county_names)
 
-                            abm_flat = get_off_diagonals(normalized_epihiper_matrix, county_names)
-                            run1_flat = get_off_diagonals(algo_normalized_matrix, county_names)
+                            abm_flat = mugration_station.get_off_diagonals(normalized_epihiper_matrix, county_names)
+                            run1_flat = mugration_station.get_off_diagonals(algo_normalized_matrix, county_names)
 
                             # 1. Pearson Correlation
                             r_1, _ = pearsonr(abm_flat, run1_flat)
@@ -1072,6 +1067,14 @@ def main():
             )
             all_weekly_hist[scfg["id"]] = wh  # {algo -> [Series]}
 
+    def _prepare_samples_df(weeks_list):
+        if not weeks_list:
+            return pd.DataFrame()
+        all_samples_df = pd.concat(weeks_list, ignore_index=True)
+        if args.date_field in all_samples_df.columns:
+            all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field], errors="coerce")
+        return all_samples_df
+    
     # Small helpers for stride-aligned evaluations
     def _calendar_week_bounds(week_idx):
         anchor = start_date + timedelta(weeks=week_idx)
