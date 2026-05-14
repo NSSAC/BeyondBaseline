@@ -1005,7 +1005,7 @@ def main():
                                 continue
 
                             # Combine the in-memory weeks to get the sampled nodes
-                            all_samples_df = mugration_station._prepare_samples_df(weeks_list)
+                            all_samples_df = mugration_station._prepare_samples_df(weeks_list, date_field=args.date_field)
                             if all_samples_df.empty:
                                 continue
 
