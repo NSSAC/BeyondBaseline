@@ -37,7 +37,7 @@ def parse_args():
     ap.add_argument("--outname", default=None, help="Optional basename prefix for all output files.")
     ap.add_argument("--seed", type=int, default=42, help="Global random seed (default: 42)")
     ap.add_argument("--roll-win-inf", type=int, default=4, help="Rolling window (weeks) for infections Plot 3 (default: 4)")
-    ap.add_argument("--abm_mugration", action="store_true", default=False, help="If set, enables generation of mugration file for selected scenario/algorithm")
+    ap.add_argument("--abm_mugration",  required=False, help="Mugration file to be compared to. If set, enables generation of mugration file for selected scenario/algorithm")
 
     # ---- Sampling budget overrides ----
     ap.add_argument("--batch-size", type=int,
