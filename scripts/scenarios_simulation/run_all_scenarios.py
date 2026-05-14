@@ -907,6 +907,14 @@ def main():
     algo_list  = list(ALG.keys())
     n_algo    = len(algo_list)
 
+    def _prepare_samples_df(weeks_list):
+        if not weeks_list:
+            return pd.DataFrame()
+        all_samples_df = pd.concat(weeks_list, ignore_index=True)
+        if args.date_field in all_samples_df.columns:
+            all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field], errors="coerce")
+        return all_samples_df
+    
     for scfg in SCENARIOS:
         print(f"\n=== Running {scfg['name']} ===")
         weekly_hist, per_algo_eval, per_algo_time, weekly_samples, algo_state = run_one_scenario(
@@ -1094,13 +1102,7 @@ def main():
         mask = (df[date_col] >= window_start) & (df[date_col] <= window_end)
         return df.loc[mask]
 
-    def _prepare_samples_df(weeks_list):
-        if not weeks_list:
-            return pd.DataFrame()
-        all_samples_df = pd.concat(weeks_list, ignore_index=True)
-        if args.date_field in all_samples_df.columns:
-            all_samples_df[args.date_field] = pd.to_datetime(all_samples_df[args.date_field], errors="coerce")
-        return all_samples_df
+
 
     def _cum_kl_vs_stride(hist_list, ref_hist_list, scfg):
         n = min(len(hist_list), len(ref_hist_list))
