@@ -966,12 +966,11 @@ def main():
         pid_col = "sim_pid" if "sim_pid" in full_inf_df.columns else "pid"
         G_dir = mugration_station.build_directed_graph(full_inf_df, pid_col=pid_col, contact_col="contact_pid")
         
-        # Establish mapping and alphabet for the JSON
-        if "county" in pop_df.columns:
-            pid_to_county = pop_df.set_index("pid")["county"].to_dict()
-            unique_counties = sorted([str(c) for c in pid_to_county.values() if pd.notna(c)])
+        # Establish mapping and alphabet using the full infection list instead of pop_df
+        # This guarantees consistent matrix dimensions across all scenarios based on the true outbreak
+        if "county" in full_inf_df.columns:
+            unique_counties = sorted([str(c) for c in full_inf_df['county'].dropna().unique()])
         else:
-            pid_to_county = {}
             unique_counties = []
             
         alphabet = [""] + unique_counties
@@ -998,11 +997,12 @@ def main():
                     # 1. Prepare Tip States
                     s_pid_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
                     
-                    # Map from the sample directly if county is present, fallback to population map
                     if "county" in all_samples_df.columns:
                         known_tips = all_samples_df.set_index(s_pid_col)["county"].to_dict()
+                        known_tips = {str(k): str(v) for k, v in known_tips.items() if pd.notna(v)}
                     else:
-                        known_tips = all_samples_df[s_pid_col].astype(str).map(pid_to_county).to_dict()
+                        print(f"Warning: 'county' column missing in samples for {algo}. Skipping inference.")
+                        continue
                         
                     # Clean dictionary for processing
                     known_tips = {str(k): str(v) for k, v in known_tips.items() if pd.notna(v)}
