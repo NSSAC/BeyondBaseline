@@ -26,7 +26,7 @@ def build_directed_graph(df: pd.DataFrame, pid_col="sim_pid", contact_col="conta
     G.add_edges_from(valid_edges)
     return G
 
-def _prepare_samples_df(weeks_list):
+def _prepare_samples_df(weeks_list, pid_col="sim_pid", contact_col="contact_pid"):
     if not weeks_list:
         return pd.DataFrame()
     all_samples_df = pd.concat(weeks_list, ignore_index=True)
