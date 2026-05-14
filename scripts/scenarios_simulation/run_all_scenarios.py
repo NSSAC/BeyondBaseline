@@ -309,8 +309,15 @@ def normalize_age_group_col(df, col="age_group"):
 # ----------------- load & preprocess -----------------
 def load_linelist_and_population(linelist_path, population_path, date_field, start_date, min_pool, features: list[str]):
     line_df = pd.read_csv(linelist_path, parse_dates=[date_field])
-    pop_df  = pd.read_csv(population_path)
-
+    #read population_path using read csv. but look ahead if first line is JSON then skip it.
+    with open(population_path, 'r') as f:
+        first_line = f.readline()
+        if first_line.strip().startswith("{"):
+            # It's JSON, so skip it and read the rest as CSV
+            pop_df = pd.read_csv(f)
+        else:
+            # Not JSON, so read from the beginning
+            pop_df = pd.read_csv(population_path)
     # Normalize age_group in both population and linelist (handles codes or long labels)
     pop_df  = normalize_age_group_col(pop_df,  "age_group")
     line_df = normalize_age_group_col(line_df, "age_group")
