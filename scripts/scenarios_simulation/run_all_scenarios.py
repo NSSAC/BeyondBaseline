@@ -959,8 +959,8 @@ def main():
     if args.abm_mugration != None:
         import mugration_station
         print("Mugration analysis")
-        county_names, epihiper_matrix = read_traits_json(args.abm_mugration)
-        normalized_epihiper_matrix = align_and_normalize_matrix(epihiper_matrix, county_names, county_names)
+        county_names, epihiper_matrix = mugration_station.read_traits_json(args.abm_mugration)
+        normalized_epihiper_matrix = mugration_station.align_and_normalize_matrix(epihiper_matrix, county_names, county_names)
 
         print("\nBuilding directed transmission graph for Mugration analysis...")
         pid_col = "sim_pid" if "sim_pid" in full_inf_df.columns else "pid"
