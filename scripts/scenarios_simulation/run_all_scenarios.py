@@ -37,6 +37,7 @@ def parse_args():
     ap.add_argument("--outname", default=None, help="Optional basename prefix for all output files.")
     ap.add_argument("--seed", type=int, default=42, help="Global random seed (default: 42)")
     ap.add_argument("--roll-win-inf", type=int, default=4, help="Rolling window (weeks) for infections Plot 3 (default: 4)")
+    ap.add_argument("--abm_mugration", action="store_true", default=False, help="If set, enables generation of mugration file for selected scenario/algorithm")
 
     # ---- Sampling budget overrides ----
     ap.add_argument("--batch-size", type=int,
@@ -444,7 +445,7 @@ def build_weekly_variant_counts(
 
         cur += timedelta(weeks=1)
 
-    return weekly_variant_counts
+    return weekly_variant_counts, inf
 
 
 
@@ -945,9 +946,89 @@ def main():
                 print(f"    - Saved {len(full_sample_df)} samples to {sample_out_path}")
 
     # ---------- build infections weekly history ----------
-    weekly_inf_hist = build_weekly_infections(
+    weekly_inf_hist, full_inf_df = build_weekly_infections(
         args.infections, pop_df, start_date, num_weeks_ref=len(weekly_ll_hist), date_col="date"
     )
+    if args.abm_mugration != None:
+        import mugration_station
+        print("Mugration analysis")
+        county_names, epihiper_matrix = read_traits_json(args.abm_mugration)
+        normalized_epihiper_matrix = align_and_normalize_matrix(epihiper_matrix, county_names, county_names)
+
+        print("\nBuilding directed transmission graph for Mugration analysis...")
+        pid_col = "sim_pid" if "sim_pid" in full_inf_df.columns else "pid"
+        G_dir = mugration_station.build_directed_graph(full_inf_df, pid_col=pid_col, contact_col="contact_pid")
+        
+        # Establish mapping and alphabet for the JSON
+        if "county" in pop_df.columns:
+            pid_to_county = pop_df.set_index("pid")["county"].to_dict()
+            unique_counties = sorted([str(c) for c in pid_to_county.values() if pd.notna(c)])
+        else:
+            pid_to_county = {}
+            unique_counties = []
+            
+        alphabet = [""] + unique_counties
+        sim_duration_years = len(weekly_ll_hist) / 52.1429
+
+        if len(G_dir.nodes()) > 0 and len(alphabet) > 1:
+            print("Computing Mugration matrices for all scenarios/algorithms...")
+            for scfg in SCENARIOS:
+                sid = scfg["id"]
+                weekly_samples_scen = all_weekly_samples.get(sid, {})
+                if not weekly_samples_scen:
+                    continue
+
+                for algo in algo_list:
+                    weeks_list = weekly_samples_scen.get(algo, [])
+                    if not weeks_list:
+                        continue
+
+                    # Combine the in-memory weeks to get the sampled nodes
+                    all_samples_df = _prepare_samples_df(weeks_list)
+                    if all_samples_df.empty:
+                        continue
+
+                    # 1. Prepare Tip States
+                    s_pid_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
+                    
+                    # Map from the sample directly if county is present, fallback to population map
+                    if "county" in all_samples_df.columns:
+                        known_tips = all_samples_df.set_index(s_pid_col)["county"].to_dict()
+                    else:
+                        known_tips = all_samples_df[s_pid_col].astype(str).map(pid_to_county).to_dict()
+                        
+                    # Clean dictionary for processing
+                    known_tips = {str(k): str(v) for k, v in known_tips.items() if pd.notna(v)}
+                    
+                    # 2. Run Inference
+                    mug_res = mugration_station.simulate_inference_and_matrix(G_dir, known_tips, alphabet, sim_duration_years)
+                    
+                    # 3. Save Output
+                    sample_prefix = output_basename if output_basename else run_id
+                    mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{sid}_{algo}.json")
+
+                    algo_normalized_matrix = align_and_normalize_matrix(mug_res['county']["transition_matrix"], mug_res['county']["alphabet"], county_names)
+
+                    abm_flat = get_off_diagonals(normalized_epihiper_matrix, county_names)
+                    run1_flat = get_off_diagonals(algo_normalized_matrix, county_names)
+
+                    # 1. Pearson Correlation
+                    r_1, _ = pearsonr(abm_flat, run1_flat)
+
+                    print(f"Run 1 Pearson Correlation: {r_1:.4f}")
+
+                    # 2. Mean Absolute Error (L1 Distance)
+                    mae_1 = np.mean(np.abs(abm_flat - run1_flat))
+
+                    print(f"Run 1 MAE: {mae_1:.4f}")
+                    
+                    with open(mug_out_path, "w") as f:
+                        json.dump(mug_res, f, indent=2)
+                    print(f"  - Saved Mugration JSON: {mug_out_path.name}")
+        else:
+            print("Warning: Graph is empty or no county mapping found. Skipping Mugration JSONs.")
+
+
     weekly_variant_counts_true = build_weekly_variant_counts(
         args.infections,
         start_date,
