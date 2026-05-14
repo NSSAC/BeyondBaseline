@@ -869,6 +869,43 @@ def main():
     all_weekly_hist = {} # This will be populated to replace the replay loop
     all_weekly_samples = {}  # scenario_id -> {algo -> [DataFrame per week]}
 
+    # ---------- build infections weekly history ----------
+    weekly_inf_hist, full_inf_df = build_weekly_infections(
+        args.infections, pop_df, start_date, num_weeks_ref=len(weekly_ll_hist), date_col="date"
+    )
+
+    weekly_variant_counts_true = build_weekly_variant_counts(
+        args.infections,
+        start_date,
+        num_weeks_ref=len(weekly_ll_hist),
+        date_col="date",
+        variant_col="variant_label",
+    )
+
+    if args.abm_mugration != None:
+        import mugration_station
+        print("Mugration analysis")
+        county_names, epihiper_matrix = mugration_station.read_traits_json(args.abm_mugration)
+        normalized_epihiper_matrix = mugration_station.align_and_normalize_matrix(epihiper_matrix, county_names, county_names)
+
+        print("\nBuilding directed transmission graph for Mugration analysis...")
+        pid_col = "sim_pid" if "sim_pid" in full_inf_df.columns else "pid"
+        G_dir = mugration_station.build_directed_graph(full_inf_df, pid_col=pid_col, contact_col="contact_pid")
+        
+        # Establish mapping and alphabet using the full infection list instead of pop_df
+        # This guarantees consistent matrix dimensions across all scenarios based on the true outbreak
+        if "county" in full_inf_df.columns:
+            unique_counties = sorted([str(c) for c in full_inf_df['county'].dropna().unique()])
+        else:
+            unique_counties = []
+            
+        alphabet = [""] + unique_counties
+        sim_duration_years = len(weekly_ll_hist) / 52.1429
+    
+    scenario_ids = [scfg["id"] for scfg in SCENARIOS]
+    scenario_cfg_map = {scfg["id"]: scfg for scfg in SCENARIOS}
+    algo_list  = list(ALG.keys())
+    n_algo    = len(algo_list)
 
     for scfg in SCENARIOS:
         print(f"\n=== Running {scfg['name']} ===")
@@ -879,11 +916,11 @@ def main():
 
         # --- FINAL PRINT FOR THIS SCENARIO ---
         print(f"--- Results for {scfg['name']} ---")
-        for algo_name, hist_list in weekly_hist.items():
+        for algo_name, sample_weeks_list in weekly_hist.items():
             # Sum up the total samples from all weeks
-            total_samples = sum(s.sum() for s in hist_list)
-            num_weeks = len(hist_list)
-            
+            total_samples = sum(s.sum() for s in sample_weeks_list)
+            num_weeks = len(sample_weeks_list)
+
             avg_per_week = total_samples / num_weeks if num_weeks > 0 else 0
             
             print(f"  > Algorithm: {algo_name:<15} | Total Samples: {int(total_samples):<6} | "
@@ -928,14 +965,14 @@ def main():
 
         if args.save_samples:
             print(f"  Saving selected samples for {scfg['name']}...")
-            
-            for algo_name, sample_weeks_list in weekly_samples.items():
-                if not sample_weeks_list:
-                    continue
+        for algo_name, sample_weeks_list in weekly_samples.items():
+            if not sample_weeks_list:
+                continue
 
-                # Use the data directly from the scenario run, which already has full rows
-                full_sample_df = pd.concat(sample_weeks_list, ignore_index=True)
-
+            # Use the data directly from the scenario run, which already has full rows
+            full_sample_df = pd.concat(sample_weeks_list, ignore_index=True)
+            sample_prefix = output_basename if output_basename else run_id
+            if args.save_samples:
                 # Add your metadata
                 full_sample_df = full_sample_df.assign(
                     run_id=run_id,
@@ -945,111 +982,75 @@ def main():
                     algorithm=algo_name,
                 )
 
-                sample_prefix = output_basename if output_basename else run_id
                 sample_out_path = outdir / f"{sample_prefix}_scenario{scfg['id']}_{algo_name}_samples.csv.xz"
                 full_sample_df.to_csv(sample_out_path, index=False, compression="xz")
                 
                 # This print should now match your "Results for Scenario X" log
                 print(f"    - Saved {len(full_sample_df)} samples to {sample_out_path}")
+            if args.abm_mugration is not None:
+                if len(G_dir.nodes()) > 0 and len(alphabet) > 1:
+                    print("Computing Mugration matrices for all scenarios/algorithms...")
+                    for scfg in SCENARIOS:
+                        sid = scfg["id"]
+                        weekly_samples_scen = all_weekly_samples.get(sid, {})
+                        if not weekly_samples_scen:
+                            continue
 
-    # ---------- build infections weekly history ----------
-    weekly_inf_hist, full_inf_df = build_weekly_infections(
-        args.infections, pop_df, start_date, num_weeks_ref=len(weekly_ll_hist), date_col="date"
-    )
-    if args.abm_mugration != None:
-        import mugration_station
-        print("Mugration analysis")
-        county_names, epihiper_matrix = mugration_station.read_traits_json(args.abm_mugration)
-        normalized_epihiper_matrix = mugration_station.align_and_normalize_matrix(epihiper_matrix, county_names, county_names)
+                        for algo in algo_list:
+                            weeks_list = weekly_samples_scen.get(algo, [])
+                            if not weeks_list:
+                                continue
 
-        print("\nBuilding directed transmission graph for Mugration analysis...")
-        pid_col = "sim_pid" if "sim_pid" in full_inf_df.columns else "pid"
-        G_dir = mugration_station.build_directed_graph(full_inf_df, pid_col=pid_col, contact_col="contact_pid")
-        
-        # Establish mapping and alphabet using the full infection list instead of pop_df
-        # This guarantees consistent matrix dimensions across all scenarios based on the true outbreak
-        if "county" in full_inf_df.columns:
-            unique_counties = sorted([str(c) for c in full_inf_df['county'].dropna().unique()])
-        else:
-            unique_counties = []
-            
-        alphabet = [""] + unique_counties
-        sim_duration_years = len(weekly_ll_hist) / 52.1429
+                            # Combine the in-memory weeks to get the sampled nodes
+                            all_samples_df = _prepare_samples_df(weeks_list)
+                            if all_samples_df.empty:
+                                continue
 
-        if len(G_dir.nodes()) > 0 and len(alphabet) > 1:
-            print("Computing Mugration matrices for all scenarios/algorithms...")
-            for scfg in SCENARIOS:
-                sid = scfg["id"]
-                weekly_samples_scen = all_weekly_samples.get(sid, {})
-                if not weekly_samples_scen:
-                    continue
+                            # 1. Prepare Tip States
+                            s_pid_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
+                            
+                            if "county" in all_samples_df.columns:
+                                known_tips = all_samples_df.set_index(s_pid_col)["county"].to_dict()
+                                known_tips = {str(k): str(v) for k, v in known_tips.items() if pd.notna(v)}
+                            else:
+                                print(f"Warning: 'county' column missing in samples for {algo}. Skipping inference.")
+                                continue
+                                
+                            # Clean dictionary for processing
+                            known_tips = {str(k): str(v) for k, v in known_tips.items() if pd.notna(v)}
+                            
+                            # 2. Run Inference
+                            mug_res = mugration_station.simulate_inference_and_matrix(G_dir, known_tips, alphabet, sim_duration_years)
+                            
+                            # 3. Save Output
+                            sample_prefix = output_basename if output_basename else run_id
+                            mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{sid}_{algo}.json")
 
-                for algo in algo_list:
-                    weeks_list = weekly_samples_scen.get(algo, [])
-                    if not weeks_list:
-                        continue
+                            algo_normalized_matrix = align_and_normalize_matrix(mug_res['county']["transition_matrix"], mug_res['county']["alphabet"], county_names)
 
-                    # Combine the in-memory weeks to get the sampled nodes
-                    all_samples_df = _prepare_samples_df(weeks_list)
-                    if all_samples_df.empty:
-                        continue
+                            abm_flat = get_off_diagonals(normalized_epihiper_matrix, county_names)
+                            run1_flat = get_off_diagonals(algo_normalized_matrix, county_names)
 
-                    # 1. Prepare Tip States
-                    s_pid_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
-                    
-                    if "county" in all_samples_df.columns:
-                        known_tips = all_samples_df.set_index(s_pid_col)["county"].to_dict()
-                        known_tips = {str(k): str(v) for k, v in known_tips.items() if pd.notna(v)}
-                    else:
-                        print(f"Warning: 'county' column missing in samples for {algo}. Skipping inference.")
-                        continue
-                        
-                    # Clean dictionary for processing
-                    known_tips = {str(k): str(v) for k, v in known_tips.items() if pd.notna(v)}
-                    
-                    # 2. Run Inference
-                    mug_res = mugration_station.simulate_inference_and_matrix(G_dir, known_tips, alphabet, sim_duration_years)
-                    
-                    # 3. Save Output
-                    sample_prefix = output_basename if output_basename else run_id
-                    mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{sid}_{algo}.json")
+                            # 1. Pearson Correlation
+                            r_1, _ = pearsonr(abm_flat, run1_flat)
 
-                    algo_normalized_matrix = align_and_normalize_matrix(mug_res['county']["transition_matrix"], mug_res['county']["alphabet"], county_names)
+                            print(f"Run 1 Pearson Correlation: {r_1:.4f}")
 
-                    abm_flat = get_off_diagonals(normalized_epihiper_matrix, county_names)
-                    run1_flat = get_off_diagonals(algo_normalized_matrix, county_names)
+                            # 2. Mean Absolute Error (L1 Distance)
+                            mae_1 = np.mean(np.abs(abm_flat - run1_flat))
 
-                    # 1. Pearson Correlation
-                    r_1, _ = pearsonr(abm_flat, run1_flat)
+                            print(f"Run 1 MAE: {mae_1:.4f}")
+                            
+                            with open(mug_out_path, "w") as f:
+                                json.dump(mug_res, f, indent=2)
+                            print(f"  - Saved Mugration JSON: {mug_out_path.name}")
+                else:
+                    print("Warning: Graph is empty or no county mapping found. Skipping Mugration JSONs.")
 
-                    print(f"Run 1 Pearson Correlation: {r_1:.4f}")
-
-                    # 2. Mean Absolute Error (L1 Distance)
-                    mae_1 = np.mean(np.abs(abm_flat - run1_flat))
-
-                    print(f"Run 1 MAE: {mae_1:.4f}")
-                    
-                    with open(mug_out_path, "w") as f:
-                        json.dump(mug_res, f, indent=2)
-                    print(f"  - Saved Mugration JSON: {mug_out_path.name}")
-        else:
-            print("Warning: Graph is empty or no county mapping found. Skipping Mugration JSONs.")
-
-
-    weekly_variant_counts_true = build_weekly_variant_counts(
-        args.infections,
-        start_date,
-        num_weeks_ref=len(weekly_ll_hist),
-        date_col="date",
-        variant_col="variant_label",
-    )
 
 
     marker_map = {1:"o", 2:"s", 3:"D", 4:"^", 5:"v", 6:">", 7:"P", 8:"X"}
-    scenario_ids = [scfg["id"] for scfg in SCENARIOS]
-    scenario_cfg_map = {scfg["id"]: scfg for scfg in SCENARIOS}
-    algo_list  = list(ALG.keys())
-    n_algo    = len(algo_list)
+
     if False: #this isn't needed now that all_weekly_hist is populated in the original run
         print("\nReplaying samples for plotting (seeded) …")
         marker_map = {1:"o", 2:"s", 3:"D", 4:"^", 5:"v", 6:">", 7:"P", 8:"X"}
