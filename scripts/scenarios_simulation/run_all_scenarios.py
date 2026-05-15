@@ -1011,7 +1011,7 @@ def main():
                                 continue
 
                             # 1. Prepare Tip States
-                            s_pid_col = "sim_node"
+                            s_pid_col = "alias_pid"
                             
                             if "county" in all_samples_df.columns:
                                 known_tips = all_samples_df.set_index(s_pid_col)["county"].to_dict()
