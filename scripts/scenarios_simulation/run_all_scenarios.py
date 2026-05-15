@@ -876,7 +876,7 @@ def main():
         args.infections, pop_df, start_date, num_weeks_ref=len(weekly_ll_hist), date_col="date"
     )
 
-    weekly_variant_counts_true = build_weekly_variant_counts(
+    weekly_variant_counts_true, _ = build_weekly_variant_counts(
         args.infections,
         start_date,
         num_weeks_ref=len(weekly_ll_hist),
