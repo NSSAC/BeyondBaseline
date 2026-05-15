@@ -1030,7 +1030,7 @@ def main():
                             sample_prefix = output_basename if output_basename else run_id
                             mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{sid}_{algo}.json")
 
-                            algo_normalized_matrix = mugration_station.align_and_normalize_matrix(mug_res['county']["transition_matrix"], mug_res['county']["alphabet"], county_names)
+                            algo_normalized_matrix = mugration_station.align_and_normalize_matrix(mug_res['models']['county']["transition_matrix"], mug_res['models']['county']["alphabet"], county_names)
 
                             abm_flat = mugration_station.get_off_diagonals(normalized_epihiper_matrix, county_names)
                             run1_flat = mugration_station.get_off_diagonals(algo_normalized_matrix, county_names)
