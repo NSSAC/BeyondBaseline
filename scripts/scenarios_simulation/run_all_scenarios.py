@@ -162,7 +162,7 @@ def _normalize_stratifiers(tokens: list[str]) -> list[str]:
     return ordered
 
 # --------- infection tree helpers ----------
-def build_undirected_adj(df, pid_col="sim_pid", contact_col="contact_pid"):
+def build_undirected_adj(df, pid_col="alias_pid", contact_col="alias_contact"):
     """
     Builds an adjacency list for the entire transmission network (undirected).
     Returns: dict {pid: [neighbor_pids]}
@@ -375,15 +375,16 @@ def build_weekly_infections(infections_path, pop_df, start_date, num_weeks_ref, 
         raise ValueError(f"Unable to parse any dates in infections column '{date_col}'.")
 
     # Map pid -> group using population file
-    pid_col = "pid" if "pid" in inf.columns else ("sim_pid" if "sim_pid" in inf.columns else None)
+    pid_col = "sim_pid" if "sim_pid" in inf.columns else ("pid" if "pid" in inf.columns else None)
     if pid_col is None:
-        raise ValueError("Infections file must contain 'pid' or 'sim_pid' to map to demographic groups.")
+        raise ValueError("Infections file must contain 'sim_pid' or 'pid' to map to demographic groups.")
 
-    if "pid" not in pop_df.columns:
-        raise ValueError("Population file must have a 'pid' column to map infections to 'group'.")
+    pop_pid_col = "sim_pid" if "sim_pid" in pop_df.columns else "pid"
+    if pop_pid_col not in pop_df.columns:
+        raise ValueError("Population file must have a 'sim_pid' or 'pid' column to map infections to 'group'.")
 
-    pid_group_map = pop_df[["pid", "group"]].dropna()
-    inf = inf.merge(pid_group_map, left_on=pid_col, right_on="pid", how="left")
+    pid_group_map = pop_df[[pop_pid_col, "group"]].dropna()
+    inf = inf.merge(pid_group_map, left_on=pid_col, right_on=pop_pid_col, how="left")
     inf = inf.dropna(subset=["group"])
 
     # Weekly counts aligned to linelist weeks
@@ -754,7 +755,7 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
             sample_df = sampler(pool_df, target_dist, batch_size, min_per_group, prior_groups, state, rng)
 
             # --- recover full linelist rows and preserve ORIGINAL base indices ---
-            KEY_COLS = ["sim_pid", "sim_tick"]  # prefer both; fall back if needed
+            KEY_COLS = ["alias_pid", "sim_tick"]  # prefer both; fall back if needed
 
             # Case 1: sampler preserved original pool_df indices
             if sample_df.index.isin(pool_df.index).all():
@@ -890,8 +891,8 @@ def main():
         normalized_epihiper_matrix = mugration_station.align_and_normalize_matrix(epihiper_matrix, county_names, county_names)
 
         print("\nBuilding directed transmission graph for Mugration analysis...")
-        pid_col = "sim_pid" if "sim_pid" in full_inf_df.columns else "pid"
-        G_dir = mugration_station.build_directed_graph(full_inf_df, pid_col=pid_col, contact_col="contact_pid")
+        pid_col = "alias_pid" if "alias_pid" in full_inf_df.columns else "sim_pid"
+        G_dir = mugration_station.build_directed_graph(full_inf_df, pid_col=pid_col, contact_col="alias_contact", date_col="date")
         
         # Establish mapping and alphabet using the full infection list instead of pop_df
         # This guarantees consistent matrix dimensions across all scenarios based on the true outbreak
@@ -1442,12 +1443,12 @@ def main():
             plt.close(figG)
 
         # =================== FIGURES I, J, K, L: Coverage by Tree Size ===================
-        if "contact_pid" in line_df.columns:
+        if "alias_contact" in line_df.columns:
             print("Computing Tree Coverage Scores for various sizes (Figs I-L)...")
             
             # 1. Build Graph & Precompute Sizes
-            adj_graph = build_undirected_adj(line_df, pid_col="sim_pid", contact_col="contact_pid")
-            all_pids_set = set(line_df["sim_pid"].astype(str))
+            adj_graph = build_undirected_adj(line_df, pid_col="alias_pid", contact_col="alias_contact")
+            all_pids_set = set(line_df["alias_pid"].astype(str))
             pid_sizes = precompute_component_sizes(adj_graph, all_pids_set)
             
             # Define thresholds and Figure labels
@@ -1484,11 +1485,11 @@ def main():
                         _, week_end_date = _calendar_week_bounds(end_idx)
                         
                         mask_sample = all_samples_df[args.date_field] <= week_end_date
-                        s_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
+                        s_col = "alias_pid" if "alias_pid" in all_samples_df.columns else "pid"
                         s_ids = set(all_samples_df.loc[mask_sample, s_col].astype(str))
                         
                         mask_pop = line_df[args.date_field] <= week_end_date
-                        pt_ids_all = set(line_df.loc[mask_pop, "sim_pid"].astype(str))
+                        pt_ids_all = set(line_df.loc[mask_pop, "alias_pid"].astype(str))
                         
                         for thresh, _, _ in THRESHOLDS:
                             pt_ids_filtered = {
@@ -1542,7 +1543,7 @@ def main():
                 plt.close(fig)
 
         # =================== FIGURE M: 8-Week Rolling Tree Coverage ===================
-        if "contact_pid" in line_df.columns:
+        if "alias_contact" in line_df.columns:
             print("Computing 8-Week Rolling Tree Coverage Score (Figure M)...")
             
             ROLL_WIN_TREE = 8
@@ -1550,7 +1551,7 @@ def main():
 
             # If adj_graph isn't already built in your scope from the previous block, build it:
             if 'adj_graph' not in locals():
-                adj_graph = build_undirected_adj(line_df, pid_col="sim_pid", contact_col="contact_pid")
+                adj_graph = build_undirected_adj(line_df, pid_col="alias_pid", contact_col="alias_contact")
 
             for scfg in SCENARIOS:
                 sid = scfg["id"]
@@ -1578,13 +1579,13 @@ def main():
                             (line_df[args.date_field] >= window_start_date) & 
                             (line_df[args.date_field] <= window_end_date)
                         )
-                        pt_ids_window = set(line_df.loc[mask_pop, "sim_pid"].astype(str))
+                        pt_ids_window = set(line_df.loc[mask_pop, "alias_pid"].astype(str))
                         
                         mask_sample = (
                             (all_samples_df[args.date_field] >= window_start_date) & 
                             (all_samples_df[args.date_field] <= window_end_date)
                         )
-                        s_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
+                        s_col = "alias_pid" if "alias_pid" in all_samples_df.columns else "pid"
                         s_ids_window = set(all_samples_df.loc[mask_sample, s_col].astype(str))
                         
                         score = calculate_coverage_score(pt_ids_window, s_ids_window, adj_graph)
@@ -1626,7 +1627,7 @@ def main():
             plt.close(figM)
 
         # =================== FIGURE N: Longitudinal Equity Heatmap (By Age Group) ===================
-        if "contact_pid" in line_df.columns and "age_group" in line_df.columns:
+        if "alias_contact" in line_df.columns and "age_group" in line_df.columns:
             print("Computing Longitudinal Equity Heatmaps by Age Group (Figure N)...")
 
             # 1. Get unique, valid age groups from the linelist
@@ -1637,7 +1638,7 @@ def main():
 
             # Ensure adj_graph is available
             if 'adj_graph' not in locals():
-                adj_graph = build_undirected_adj(line_df, pid_col="sim_pid", contact_col="contact_pid")
+                adj_graph = build_undirected_adj(line_df, pid_col="alias_pid", contact_col="alias_contact")
 
             # --- Compute Scores ---
             for scfg in SCENARIOS:
@@ -1661,14 +1662,14 @@ def main():
                         _, week_end_date = _calendar_week_bounds(end_idx)
 
                         mask_sample = all_samples_df[args.date_field] <= week_end_date
-                        s_col = "sim_pid" if "sim_pid" in all_samples_df.columns else "pid"
+                        s_col = "alias_pid" if "alias_pid" in all_samples_df.columns else "pid"
                         s_ids = set(all_samples_df.loc[mask_sample, s_col].astype(str))
 
                         mask_pop = line_df[args.date_field] <= week_end_date
                         pop_this_week = line_df.loc[mask_pop]
 
                         for ag in age_groups:
-                            pt_ag_ids = set(pop_this_week.loc[pop_this_week["age_group"] == ag, "sim_pid"].astype(str))
+                            pt_ag_ids = set(pop_this_week.loc[pop_this_week["age_group"] == ag, "alias_pid"].astype(str))
                             
                             score = calculate_coverage_score(pt_ag_ids, s_ids, adj_graph)
                             xs, ys = series_map[ag]

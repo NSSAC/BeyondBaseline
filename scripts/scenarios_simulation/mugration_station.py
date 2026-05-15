@@ -5,7 +5,7 @@ import pandas as pd
 import numpy as np
 
 
-def build_directed_graph(df: pd.DataFrame, pid_col="sim_pid", contact_col="contact_pid") -> nx.DiGraph:
+def build_directed_graph(df: pd.DataFrame, pid_col="alias_pid", contact_col="alias_contact") -> nx.DiGraph:
     """
     Builds a directed graph from infector (contact_pid) to infectee (pid).
     """
@@ -13,12 +13,12 @@ def build_directed_graph(df: pd.DataFrame, pid_col="sim_pid", contact_col="conta
     if pid_col not in df.columns or contact_col not in df.columns:
         return G
     
-    df["sim_node"]= df[pid_col].astype(str) +"_"+ df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
-    df["contact_node"]= df[contact_col].astype(str) +"_"+ df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
+    #df["sim_node"]= df[pid_col].astype(str) +"_"+ df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
+    #df["contact_node"]= df[contact_col].astype(str) +"_"+ df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
 
     
-    pids = df["sim_node"].astype(str)
-    contacts = df["contact_node"].astype(str)
+    pids = df[pid_col].astype(str)
+    contacts = df[contact_col].astype(str)
     edges = zip(contacts, pids)
     
     # Valid directed edges (ignore -1, nan, or self-loops)
@@ -26,12 +26,10 @@ def build_directed_graph(df: pd.DataFrame, pid_col="sim_pid", contact_col="conta
     G.add_edges_from(valid_edges)
     return G
 
-def _prepare_samples_df(weeks_list, pid_col="sim_pid", contact_col="contact_pid", date_field=None):
+def _prepare_samples_df(weeks_list, pid_col="alias_pid", contact_col="alias_contact", date_field=None):
     if not weeks_list:
         return pd.DataFrame()
     all_samples_df = pd.concat(weeks_list, ignore_index=True)
-    all_samples_df["sim_node"]= all_samples_df[pid_col].astype(str) +"_"+ all_samples_df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
-    all_samples_df["contact_node"]= all_samples_df[contact_col].astype(str) +"_"+ all_samples_df["sim_tick"].astype(str) # Ensure sim_node is string for graph nodes
     if date_field in all_samples_df.columns:
         all_samples_df[date_field] = pd.to_datetime(all_samples_df[date_field], errors="coerce")
     return all_samples_df
