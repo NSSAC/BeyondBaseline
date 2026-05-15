@@ -892,7 +892,7 @@ def main():
 
         print("\nBuilding directed transmission graph for Mugration analysis...")
         pid_col = "alias_pid" if "alias_pid" in full_inf_df.columns else "sim_pid"
-        G_dir = mugration_station.build_directed_graph(full_inf_df, pid_col=pid_col, contact_col="alias_contact", date_col="date")
+        G_dir = mugration_station.build_directed_graph(full_inf_df, pid_col=pid_col, contact_col="alias_contact")
         
         # Establish mapping and alphabet using the full infection list instead of pop_df
         # This guarantees consistent matrix dimensions across all scenarios based on the true outbreak
