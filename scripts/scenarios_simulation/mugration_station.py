@@ -30,7 +30,7 @@ def get_off_diagonals(matrix, alphabet):
     """Flattens a matrix into a 1D array, ignoring the diagonal."""
     N = len(alphabet)
     off_diags = []
-    if county_names[0] =="" or county_names[0] == "?":
+    if alphabet[0] =="" or alphabet[0] == "?":
         initial_index = 1
     else:
         initial_index = 0
