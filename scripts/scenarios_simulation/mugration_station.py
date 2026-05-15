@@ -26,6 +26,22 @@ def build_directed_graph(df: pd.DataFrame, pid_col="alias_pid", contact_col="ali
     G.add_edges_from(valid_edges)
     return G
 
+def get_off_diagonals(matrix, alphabet):
+    """Flattens a matrix into a 1D array, ignoring the diagonal."""
+    N = len(alphabet)
+    off_diags = []
+    if county_names[0] =="" or county_names[0] == "?":
+        initial_index = 1
+    else:
+        initial_index = 0
+    
+    for i in range(initial_index, N):
+        for j in range(initial_index, N):
+            if i!= j:
+                off_diags.append(matrix[i][j])
+    return np.array(off_diags)
+
+
 def _prepare_samples_df(weeks_list, pid_col="alias_pid", contact_col="alias_contact", date_field=None):
     if not weeks_list:
         return pd.DataFrame()
