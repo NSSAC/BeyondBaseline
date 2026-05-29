@@ -315,10 +315,10 @@ def load_linelist_and_population(linelist_path, population_path, date_field, sta
         first_line = f.readline()
         if first_line.strip().startswith("{"):
             # It's JSON, so skip it and read the rest as CSV
-            pop_df = pd.read_csv(f)
+            pop_df = pd.read_csv(f, dtype={'sim_pid': str, 'pid': str})
         else:
             # Not JSON, so read from the beginning
-            pop_df = pd.read_csv(population_path)
+            pop_df = pd.read_csv(population_path, dtype={'sim_pid': str, 'pid': str})
     # Normalize age_group in both population and linelist (handles codes or long labels)
     pop_df  = normalize_age_group_col(pop_df,  "age_group")
     line_df = normalize_age_group_col(line_df, "age_group")
