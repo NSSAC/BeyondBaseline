@@ -90,6 +90,8 @@ def simulate_inference_and_matrix(G, known_tip_states, alphabet, simulation_dura
         if parent_loc and child_loc and parent_loc != child_loc:
             transfer_counts[parent_loc][child_loc] += 1
             total_jumps += 1
+    print(f"      Mugration Inference complete: Found {total_jumps} geographic transitions across the network.")
+
             
     # Calculate Equilibrium Probabilities
     state_counts = Counter(inferred_states.values())
