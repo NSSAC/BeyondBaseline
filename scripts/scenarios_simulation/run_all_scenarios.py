@@ -181,7 +181,7 @@ def build_undirected_adj(df, pid_col="alias_pid", contact_col="alias_contact"):
         if u not in adj: adj[u] = []
         
         # Valid edge check (ignore -1 or self-loops)
-        if v and v != "-1" and v != "nan" and v != u:
+        if u and v and u != "-1" and v != "-1" and u != "nan" and v != "nan" and u != v:
             if v not in adj: adj[v] = []
             
             # Add undirected edge
