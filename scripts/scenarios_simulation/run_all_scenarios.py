@@ -309,7 +309,7 @@ def normalize_age_group_col(df, col="age_group"):
 
 # ----------------- load & preprocess -----------------
 def load_linelist_and_population(linelist_path, population_path, date_field, start_date, min_pool, features: list[str]):
-    line_df = pd.read_csv(linelist_path, parse_dates=[date_field])
+    line_df = pd.read_csv(linelist_path, parse_dates=[date_field], dtype={'alias_pid': str, 'alias_contact': str, 'sim_pid': str, 'pid': str, 'contact_pid': str})
     #read population_path using read csv. but look ahead if first line is JSON then skip it.
     with open(population_path, 'r') as f:
         first_line = f.readline()
@@ -354,7 +354,7 @@ def build_weekly_infections(infections_path, pop_df, start_date, num_weeks_ref, 
     Now requires a real date column in the infections file (default: 'date').
     """
     # Let pandas sniff the delimiter (comma, tab, etc.) and avoid skipping header rows.
-    inf = pd.read_csv(infections_path, sep=None, engine="python")
+    inf = pd.read_csv(infections_path, sep=None, engine="python", dtype={'alias_pid': str, 'alias_contact': str, 'sim_pid': str, 'pid': str, 'contact_pid': str})
     inf.columns = [c.strip() for c in inf.columns]
 
     inf = normalize_age_group_col(inf, "age_group")
@@ -414,7 +414,7 @@ def build_weekly_variant_counts(
     weekly_variant_counts : list of pd.Series
         One entry per week. Each Series has index=variant_label, values=counts.
     """
-    inf = pd.read_csv(infections_path, sep=None, engine="python")
+    inf = pd.read_csv(infections_path, sep=None, engine="python", dtype={'alias_pid': str, 'alias_contact': str, 'sim_pid': str, 'pid': str, 'contact_pid': str})
     inf.columns = [c.strip() for c in inf.columns]
 
     # resolve date column (case-insensitive)
