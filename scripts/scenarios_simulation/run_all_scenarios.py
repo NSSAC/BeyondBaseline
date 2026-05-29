@@ -993,64 +993,56 @@ def main():
                 print(f"    - Saved {len(full_sample_df)} samples to {sample_out_path}")
             if args.abm_mugration is not None:
                 if len(G_dir.nodes()) > 0 and len(alphabet) > 1:
-                    print("Computing Mugration matrices for all scenarios/algorithms...")
-                    for scfg in SCENARIOS:
-                        sid = scfg["id"]
-                        weekly_samples_scen = all_weekly_samples.get(sid, {})
-                        if not weekly_samples_scen:
+                    print(f"Computing Mugration matrices for {scfg['name']}...")
+                    sid = scfg["id"]
+                    
+                    for algo in algo_list:
+                        weeks_list = weekly_samples.get(algo, [])
+                        if not weeks_list:
                             continue
 
-                        for algo in algo_list:
-                            weeks_list = weekly_samples_scen.get(algo, [])
-                            if not weeks_list:
-                                continue
+                        # Combine the in-memory weeks to get the sampled nodes
+                        all_samples_df = pd.concat(weeks_list, ignore_index=True)
+                        if all_samples_df.empty:
+                            continue
 
-                            # Combine the in-memory weeks to get the sampled nodes
-                            all_samples_df = mugration_station._prepare_samples_df(weeks_list, date_field=args.date_field)
-                            if all_samples_df.empty:
-                                continue
-
-                            # 1. Prepare Tip States
-                            s_pid_col = "alias_pid"
+                        # 1. Prepare Tip States
+                        # CRITICAL FIX: Use 'alias_pid' so the sample IDs match the Graph nodes exactly
+                        s_pid_col = "alias_pid" if "alias_pid" in all_samples_df.columns else "sim_pid"
+                        
+                        if "county" in all_samples_df.columns:
+                            raw_tips = all_samples_df.set_index(s_pid_col)["county"].to_dict()
+                            # Clean the keys to ensure no floating point ".0" artifacts break the string match
+                            known_tips = {str(k).replace(".0", ""): str(v) for k, v in raw_tips.items() if pd.notna(v)}
+                        else:
+                            print(f"Warning: 'county' column missing in samples for {algo}. Skipping inference.")
+                            continue
                             
-                            if "county" in all_samples_df.columns:
-                                known_tips = all_samples_df.set_index(s_pid_col)["county"].to_dict()
-                                known_tips = {str(k): str(v) for k, v in known_tips.items() if pd.notna(v)}
-                            else:
-                                print(f"Warning: 'county' column missing in samples for {algo}. Skipping inference.")
-                                continue
-                                
-                            # Clean dictionary for processing
-                            known_tips = {str(k): str(v) for k, v in known_tips.items() if pd.notna(v)}
-                            
-                            # 2. Run Inference
-                            mug_res = mugration_station.simulate_inference_and_matrix(G_dir, known_tips, alphabet, sim_duration_years)
-                            
-                            # 3. Save Output
-                            sample_prefix = output_basename if output_basename else run_id
-                            mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{sid}_{algo}.json")
+                        # 2. Run Inference
+                        mug_res = mugration_station.simulate_inference_and_matrix(G_dir, known_tips, alphabet, sim_duration_years)
+                        
+                        # 3. Save Output and Calculate Metrics
+                        sample_prefix = output_basename if output_basename else run_id
+                        mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{sid}_{algo}.json")
 
-                            algo_normalized_matrix = mugration_station.align_and_normalize_matrix(mug_res['models']['county']["transition_matrix"], mug_res['models']['county']["alphabet"], county_names)
+                        algo_normalized_matrix = mugration_station.align_and_normalize_matrix(mug_res['models']['county']["transition_matrix"], mug_res['models']['county']["alphabet"], county_names)
 
-                            abm_flat = mugration_station.get_off_diagonals(normalized_epihiper_matrix, county_names)
-                            run1_flat = mugration_station.get_off_diagonals(algo_normalized_matrix, county_names)
+                        abm_flat = mugration_station.get_off_diagonals(normalized_epihiper_matrix, county_names)
+                        run1_flat = mugration_station.get_off_diagonals(algo_normalized_matrix, county_names)
 
-                            # 1. Pearson Correlation
-                            r_1, _ = pearsonr(abm_flat, run1_flat)
+                        # 1. Pearson Correlation
+                        r_1, _ = pearsonr(abm_flat, run1_flat)
+                        print(f"    - {algo} Pearson Correlation: {r_1:.4f}")
 
-                            print(f"Run 1 Pearson Correlation: {r_1:.4f}")
-
-                            # 2. Mean Absolute Error (L1 Distance)
-                            mae_1 = np.mean(np.abs(abm_flat - run1_flat))
-
-                            print(f"Run 1 MAE: {mae_1:.4f}")
-                            
-                            with open(mug_out_path, "w") as f:
-                                json.dump(mug_res, f, indent=2)
-                            print(f"  - Saved Mugration JSON: {mug_out_path.name}")
+                        # 2. Mean Absolute Error (L1 Distance)
+                        mae_1 = np.mean(np.abs(abm_flat - run1_flat))
+                        print(f"    - {algo} MAE: {mae_1:.4f}")
+                        
+                        with open(mug_out_path, "w") as f:
+                            json.dump(mug_res, f, indent=2)
+                        print(f"    - Saved Mugration JSON: {mug_out_path.name}")
                 else:
                     print("Warning: Graph is empty or no county mapping found. Skipping Mugration JSONs.")
-
 
 
     marker_map = {1:"o", 2:"s", 3:"D", 4:"^", 5:"v", 6:">", 7:"P", 8:"X"}
