@@ -1067,7 +1067,7 @@ def main():
                         mugration_rows.append({
                             "algorithm": algo,
                             "scenario_id": sid,
-                            "scenario_label": scfg["name"],
+                            "scenario_label": SCEN_LABELS.get(sid, scfg["name"]),
                             "pearson_r": r_1,
                             "masked_mae": masked_mae,
                             "cosine_similarity": cos_sim,
