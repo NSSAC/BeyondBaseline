@@ -870,6 +870,7 @@ def main():
     total_algo_time   = {algo: 0.0 for algo in ALG.keys()}
     count_algo_runs   = {algo: 0   for algo in ALG.keys()}
     kl_rows = []  # accumulate per-week KL points across all panels (A/B/C)
+    mugration_rows = []  # accumulate per-week mugration points
     all_weekly_hist = {} # This will be populated to replace the replay loop
     all_weekly_samples = {}  # scenario_id -> {algo -> [DataFrame per week]}
 
@@ -1063,6 +1064,14 @@ def main():
                         else:
                             f1 = f1_score(abm_binary, run1_binary, zero_division=0)
                         print(f"    - {algo} Topological F1-Score: {f1:.4f}")
+                        mugration_rows.append({
+                            "algorithm": algo,
+                            "scenario_id": sid,
+                            "scenario_label": scfg["name"],
+                            "pearson_r": r_1,
+                            "masked_mae": masked_mae,
+                            "cosine_similarity": cos_sim,
+                            "topological_f1": f1})
                 else:
                     print("Warning: Graph is empty or no county mapping found. Skipping Mugration JSONs.")
 
@@ -1793,6 +1802,11 @@ def main():
                         f"(AUC={r['auc']:.4f}, weeks={int(r['weeks'])})")
         else:
             print("\n[Error] 'eval_type' missing from AUC results. Check metric calculations.")
+    if mugration_rows:
+        mug_df = pd.DataFrame(mugration_rows)
+        mug_out = out_path("Mugration_Metrics.csv")
+        mug_df.to_csv(mug_out, index=False)
+        print(f"Saved Mugration Metrics: {mug_out}")
 
     # print top results per evaluation to console
     # for et in auc_df["eval_type"].unique():
