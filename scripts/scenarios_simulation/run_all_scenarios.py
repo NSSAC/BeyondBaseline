@@ -12,6 +12,8 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy.spatial.distance import cosine
+from sklearn.metrics import f1_score
 
 from scenarios_config import (
     SCENARIOS,
@@ -1027,20 +1029,40 @@ def main():
 
                         algo_normalized_matrix = mugration_station.align_and_normalize_matrix(mug_res['models']['county']["transition_matrix"], mug_res['models']['county']["alphabet"], county_names)
 
-                        abm_flat = mugration_station.get_off_diagonals(normalized_epihiper_matrix, county_names)
-                        run1_flat = mugration_station.get_off_diagonals(algo_normalized_matrix, county_names)
+                        abm_flat = np.array(mugration_station.get_off_diagonals(normalized_epihiper_matrix, county_names))
+                        run1_flat = np.array(mugration_station.get_off_diagonals(algo_normalized_matrix, county_names))
 
-                        # 1. Pearson Correlation
+                        # --- 1. Pearson Correlation (Keep for legacy/reference) ---
                         r_1, _ = pearsonr(abm_flat, run1_flat)
-                        print(f"    - {algo} Pearson Correlation: {r_1:.4f}")
+                        print(f"    - {algo} Pearson: {r_1:.4f}")
 
-                        # 2. Mean Absolute Error (L1 Distance)
-                        mae_1 = np.mean(np.abs(abm_flat - run1_flat))
-                        print(f"    - {algo} MAE: {mae_1:.4f}")
+                        # --- 2. Masked MAE ---
+                        # Only look at edges that exist in either the truth OR the prediction
+                        active_edges = (abm_flat > 0) | (run1_flat > 0)
+                        if np.sum(active_edges) > 0:
+                            masked_mae = np.mean(np.abs(abm_flat[active_edges] - run1_flat[active_edges]))
+                        else:
+                            masked_mae = 0.0
+                        print(f"    - {algo} Masked MAE (Active Routes Only): {masked_mae:.4f}")
                         
-                        with open(mug_out_path, "w") as f:
-                            json.dump(mug_res, f, indent=2)
-                        print(f"    - Saved Mugration JSON: {mug_out_path.name}")
+                        # --- 3. Cosine Similarity ---
+                        # Cosine returns distance (0 is perfect), so we subtract from 1 for similarity
+                        if np.sum(abm_flat) > 0 and np.sum(run1_flat) > 0:
+                            cos_sim = 1.0 - cosine(abm_flat, run1_flat)
+                        else:
+                            cos_sim = 0.0 # Prevent division by zero if a matrix is totally empty
+                        print(f"    - {algo} Cosine Similarity: {cos_sim:.4f}")
+
+                        # --- 4. Topological F1-Score (Detection Accuracy) ---
+                        abm_binary = (abm_flat > 0).astype(int)
+                        run1_binary = (run1_flat > 0).astype(int)
+                        
+                        # Prevent warning if both are all zeros
+                        if np.sum(abm_binary) == 0 and np.sum(run1_binary) == 0:
+                            f1 = 1.0 
+                        else:
+                            f1 = f1_score(abm_binary, run1_binary, zero_division=0)
+                        print(f"    - {algo} Topological F1-Score: {f1:.4f}")
                 else:
                     print("Warning: Graph is empty or no county mapping found. Skipping Mugration JSONs.")
 
