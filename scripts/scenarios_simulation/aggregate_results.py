@@ -4,6 +4,15 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+def get_stride_group(label):
+    """Helper to categorize scenarios into 1-week or 4-week strides"""
+    label_str = str(label)
+    if '1S' in label_str:
+        return '1S'
+    elif '4S' in label_str:
+        return '4S'
+    return 'Other'
+
 def main():
     parser = argparse.ArgumentParser(description="Aggregate metrics and compute standardized Z-scores.")
     parser.add_argument("--input-dir", default="replicate_results", 
@@ -21,7 +30,7 @@ def main():
     print(f"{'='*60}")
     
     # =========================================================================
-    # 1. AGGREGATE AUC RANKINGS & CALCULATE Z-SCORES
+    # 1. AGGREGATE AUC RANKINGS & CALCULATE INDEPENDENT Z-SCORES
     # =========================================================================
     auc_files = list(input_base.glob("replicate_*/AUC_rankings.csv"))
     if auc_files:
@@ -40,6 +49,9 @@ def main():
             successful_runs=("auc", "count")
         ).reset_index()
         
+        # Assign stride group for independent normalization
+        agg_auc['stride_group'] = agg_auc['scenario_label'].apply(get_stride_group)
+        
         # --- Z-SCORE & RANK CALCULATION ---
         def process_auc_metrics(group):
             eval_type = group['eval_type'].iloc[0]
@@ -48,9 +60,10 @@ def main():
             higher_is_better_prefixes = ('F_', 'I_', 'J_', 'K_', 'L_', 'M_', 'N_')
             asc = not eval_type.startswith(higher_is_better_prefixes) # True if Lower is Better (KL, Error)
             
-            # Rank: 1 is the best. If asc=True (lower is better), rank ascending.
+            # Rank within this specific stride group
             group['rank_of_median_auc'] = group['median_auc'].rank(method="dense", ascending=asc)
             
+            # Mean and Std calculated ONLY within this stride group
             mean_val = group['median_auc'].mean()
             std_val = group['median_auc'].std()
             
@@ -59,16 +72,18 @@ def main():
             else:
                 z = (group['median_auc'] - mean_val) / std_val
                 
-                # CRITICAL: Invert Z-score for "lower is better" metrics 
-                # so that POSITIVE always means BETTER performance.
+                # Invert Z-score for "lower is better" metrics so POSITIVE = BETTER
                 if asc:
                     z = -z
                 group['z_score'] = z
                 
             return group
 
-        # Apply the logic row-wise (grouped by metric)
-        agg_auc = agg_auc.groupby("eval_type", group_keys=False).apply(process_auc_metrics)
+        # Apply the logic row-wise, grouped by metric AND stride_group
+        agg_auc = agg_auc.groupby(["eval_type", "stride_group"], group_keys=False).apply(process_auc_metrics)
+        
+        # Clean up and sort
+        agg_auc = agg_auc.drop(columns=['stride_group'])
         agg_auc = agg_auc.sort_values(["eval_type", "rank_of_median_auc", "algorithm", "scenario_id"])
         
         auc_out = outdir_base / "Aggregated_Median_AUC_Rankings.csv"
@@ -79,7 +94,7 @@ def main():
 
 
     # =========================================================================
-    # 2. AGGREGATE MUGRATION METRICS & CALCULATE Z-SCORES
+    # 2. AGGREGATE MUGRATION METRICS & CALCULATE INDEPENDENT Z-SCORES
     # =========================================================================
     print(f"\n{'='*60}")
     print(f" Aggregating Mugration Metrics from: {input_base}")
@@ -104,9 +119,10 @@ def main():
             successful_runs=("pearson_r", "count")
         ).reset_index()
         
+        # Assign stride group for independent normalization
+        agg_mug['stride_group'] = agg_mug['scenario_label'].apply(get_stride_group)
+        
         # --- Z-SCORE CALCULATION ---
-        # Map out which metrics are "lower is better"
-        # Tuple: (Column Name, is_lower_better)
         mug_metrics = [
             ('median_pearson', False),
             ('median_cosine', False),
@@ -115,21 +131,27 @@ def main():
         ]
         
         for col, lower_is_better in mug_metrics:
-            mean_val = agg_mug[col].mean()
-            std_val = agg_mug[col].std()
             z_col = col.replace('median_', 'z_score_')
+            agg_mug[z_col] = 0.0 # initialize column
             
-            if pd.isna(std_val) or std_val == 0:
-                agg_mug[z_col] = 0.0
-            else:
-                z = (agg_mug[col] - mean_val) / std_val
+            # Calculate mean and std independently for 1S and 4S
+            for sg in agg_mug['stride_group'].unique():
+                mask = agg_mug['stride_group'] == sg
+                mean_val = agg_mug.loc[mask, col].mean()
+                std_val = agg_mug.loc[mask, col].std()
                 
-                # Invert so POSITIVE always means BETTER
-                if lower_is_better:
-                    z = -z
-                agg_mug[z_col] = z
+                if pd.isna(std_val) or std_val == 0:
+                    agg_mug.loc[mask, z_col] = 0.0
+                else:
+                    z = (agg_mug.loc[mask, col] - mean_val) / std_val
+                    
+                    # Invert so POSITIVE always means BETTER
+                    if lower_is_better:
+                        z = -z
+                    agg_mug.loc[mask, z_col] = z
         
-        # Sort by F1-Score (Highest is best indicator of detecting true transmission bridges)
+        # Clean up and sort by F1-Score
+        agg_mug = agg_mug.drop(columns=['stride_group'])
         agg_mug = agg_mug.sort_values(["scenario_id", "median_f1"], ascending=[True, False])
         
         mug_out = outdir_base / "Aggregated_Mugration_Metrics.csv"
