@@ -54,16 +54,18 @@ def main():
             mug_list.append(df)
             
         all_mug = pd.concat(mug_list, ignore_index=True)
+        
+        # --- UPDATED: Grab all 4 new sparse metrics ---
         agg_mug = all_mug.groupby(["algorithm", "scenario_id", "scenario_label"]).agg(
             median_pearson=("pearson_r", "median"),
-            mean_pearson=("pearson_r", "mean"),
-            median_mae=("mae", "median"),
-            mean_mae=("mae", "mean"),
+            median_cosine=("cosine_similarity", "median"),
+            median_f1=("topological_f1", "median"),
+            median_masked_mae=("masked_mae", "median"),
             successful_runs=("pearson_r", "count")
         ).reset_index()
         
-        # Sort by Pearson (Highest is best)
-        agg_mug = agg_mug.sort_values(["scenario_id", "median_pearson"], ascending=[True, False])
+        # Sort by F1-Score (Highest is best indicator of geographic detection)
+        agg_mug = agg_mug.sort_values(["scenario_id", "median_f1"], ascending=[True, False])
         
         mug_out = outdir_base / "Aggregated_Mugration_Metrics.csv"
         agg_mug.to_csv(mug_out, index=False)
