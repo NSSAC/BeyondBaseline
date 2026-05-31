@@ -757,31 +757,21 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
             sample_df = sampler(pool_df, target_dist, batch_size, min_per_group, prior_groups, state, rng)
 
             # --- recover full linelist rows and preserve ORIGINAL base indices ---
-            KEY_COLS = ["alias_pid", "sim_tick"]  # prefer both; fall back if needed
+            KEY_COLS = ["alias_pid", "sim_tick"]  
+            usable_keys = [k for k in KEY_COLS if k in sample_df.columns and k in pool_df.columns]
 
-            # Case 1: sampler preserved original pool_df indices
-            if sample_df.index.isin(pool_df.index).all():
-                selected_base_idx = sample_df.index.tolist()
-                sample_df = pool_df.loc[selected_base_idx].copy()
+            if not usable_keys:
+                raise ValueError(f"Sampler '{algo_name}' is missing key columns {KEY_COLS}.")
 
-            else:
-                usable_keys = [k for k in KEY_COLS if k in sample_df.columns and k in pool_df.columns]
+            # We use a robust merge to perfectly identify the sampled rows regardless of index resets
+            pool_df_with_idx = pool_df.copy()
+            pool_df_with_idx["_base_idx"] = pool_df_with_idx.index
 
-                if not usable_keys:
-                    raise ValueError(
-                        f"Sampler '{algo_name}' did not preserve pool_df index and is missing key columns {KEY_COLS}. "
-                        f"Sampler cols={list(sample_df.columns)}; pool cols={list(pool_df.columns)}"
-                    )
+            keys_df = sample_df[usable_keys].dropna().drop_duplicates()
+            sample_df = pool_df_with_idx.merge(keys_df, on=usable_keys, how="inner").copy()
 
-                # keep original pool indices before merge
-                pool_df_with_idx = pool_df.copy()
-                pool_df_with_idx["_base_idx"] = pool_df_with_idx.index
-
-                keys_df = sample_df[usable_keys].dropna().drop_duplicates()
-                sample_df = pool_df_with_idx.merge(keys_df, on=usable_keys, how="inner").copy()
-
-                selected_base_idx = sample_df["_base_idx"].tolist()
-                sample_df = sample_df.drop(columns=["_base_idx"], errors="ignore")
+            selected_base_idx = sample_df["_base_idx"].tolist()
+            sample_df = sample_df.drop(columns=["_base_idx"], errors="ignore")
 
             # Update used indices for no-replacement using ORIGINAL indices
             if ov_norep or scfg.get("no_replacement", False):

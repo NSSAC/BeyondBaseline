@@ -287,11 +287,33 @@ def greedy_kl_sampler_vectorized(
         picked_row_ids.append(group_indices[i_choice][pos])
         group_pos[i_choice] = pos + 1
 
-    if not picked_row_ids:
-        return df.iloc[0:0].copy()
+    out = df.loc[picked_row_ids].copy()
+    
+    # --- NATIVE PROPORTIONAL BACKFILL ---
+    shortfall = batch_size - len(out)
+    if shortfall > 0:
+        remaining_pool = df.drop(index=out.index, errors="ignore")
+        if not remaining_pool.empty:
+            # Re-normalize target weights for the remaining groups
+            avail_groups = remaining_pool["group"].unique()
+            rem_target = target_dist.reindex(avail_groups).fillna(0.0)
+            total_weight = rem_target.sum()
+            
+            if total_weight > 0:
+                rem_target = rem_target / total_weight
+                sample_weights = remaining_pool["group"].map(rem_target)
+            else:
+                sample_weights = None # Fallback to uniform if targets are zero
+                
+            filler = remaining_pool.sample(
+                n=min(shortfall, len(remaining_pool)), 
+                replace=False, 
+                weights=sample_weights,
+                random_state=_rint(rng)
+            )
+            out = pd.concat([out, filler])
 
-    # return rows in the (selection) order made
-    return df.loc[picked_row_ids].copy().reset_index(drop=True)
+    return out.reset_index(drop=True)
 
 
 DEFAULT_MIN_COVERAGE_FRAC = 0.05  # 5% default
@@ -828,6 +850,29 @@ def lasso_clustered_vecgreedy_sampler(
             continue
 
     out = df.loc[picked_row_ids].copy() if picked_row_ids else df.iloc[0:0].copy()
+
+    # --- NATIVE PROPORTIONAL BACKFILL ---
+    shortfall = batch_size - len(out)
+    if shortfall > 0:
+        remaining_pool = df.drop(index=out.index, errors="ignore")
+        if not remaining_pool.empty:
+            avail_groups = remaining_pool["group"].unique()
+            rem_target = target_dist.reindex(avail_groups).fillna(0.0)
+            total_weight = rem_target.sum()
+            
+            if total_weight > 0:
+                rem_target = rem_target / total_weight
+                sample_weights = remaining_pool["group"].map(rem_target)
+            else:
+                sample_weights = None
+                
+            filler = remaining_pool.sample(
+                n=min(shortfall, len(remaining_pool)), 
+                replace=False, 
+                weights=sample_weights,
+                random_state=_rint(rng)
+            )
+            out = pd.concat([out, filler])
 
     # --- compute KL at group level (prior + this batch) ---
     try:
