@@ -915,14 +915,15 @@ def main():
 
     
     for scfg in SCENARIOS:
-        print(f"\n=== Running {scfg['name']} ===")
+        label = SCEN_LABELS.get(scfg["id"], "")
+        print(f"\n=== Running {scfg['name']} [{label}] ===")
         weekly_hist, per_algo_eval, per_algo_time, weekly_samples, algo_state = run_one_scenario(
             line_df, args.date_field, POP_DIST_STATIC, weekly_ll_hist,
             scfg, rng_master, start_date, args.min_pool, overrides, algorithms=ALG
         )
 
         # --- FINAL PRINT FOR THIS SCENARIO ---
-        print(f"--- Results for {scfg['name']} ---")
+        print(f"--- Results for {scfg['name']} [{label}] ---")
         for algo_name, sample_weeks_list in weekly_hist.items():
             # Sum up the total samples from all weeks
             total_samples = sum(s.sum() for s in sample_weeks_list)
@@ -970,110 +971,86 @@ def main():
         for algo, secs in per_algo_time.items():
             print(f"  {algo} time: {secs:.2f}s")
 
-        if args.save_samples:
-            print(f"  Saving selected samples for {scfg['name']}...")
-        for algo_name, sample_weeks_list in weekly_samples.items():
-            if not sample_weeks_list:
-                continue
+# --- POST-PROCESSING FOR THIS SCENARIO (SAMPLES & MUGRATION) ---
+        label = SCEN_LABELS.get(scfg["id"], scfg["name"])
+        if args.save_samples or args.abm_mugration is not None:
+            print(f"  Processing outputs (Samples & Mugration) for {scfg['name']} [{label}]...")
+            
+            for algo_name, sample_weeks_list in weekly_samples.items():
+                if not sample_weeks_list:
+                    continue
 
-            # Use the data directly from the scenario run, which already has full rows
-            full_sample_df = pd.concat(sample_weeks_list, ignore_index=True)
-            sample_prefix = output_basename if output_basename else run_id
-            if args.save_samples:
-                # Add your metadata
-                full_sample_df = full_sample_df.assign(
-                    run_id=run_id,
-                    linelist_id=linelist_id,
-                    scenario_id=scfg["id"],
-                    scenario_name=scfg["name"],
-                    algorithm=algo_name,
-                )
-
-                sample_out_path = outdir / f"{sample_prefix}_scenario{scfg['id']}_{algo_name}_samples.csv.xz"
-                full_sample_df.to_csv(sample_out_path, index=False, compression="xz")
+                full_sample_df = pd.concat(sample_weeks_list, ignore_index=True)
+                sample_prefix = output_basename if output_basename else run_id
                 
-                # This print should now match your "Results for Scenario X" log
-                print(f"    - Saved {len(full_sample_df)} samples to {sample_out_path}")
-            if args.abm_mugration is not None:
-                if len(G_dir.nodes()) > 0 and len(alphabet) > 1:
-                    print(f"Computing Mugration matrices for {scfg['name']}...")
-                    sid = scfg["id"]
-                    
-                    for algo in algo_list:
-                        weeks_list = weekly_samples.get(algo, [])
-                        if not weeks_list:
-                            continue
+                # 1. Save Samples
+                if args.save_samples:
+                    full_sample_df_out = full_sample_df.assign(
+                        run_id=run_id,
+                        linelist_id=linelist_id,
+                        scenario_id=scfg["id"],
+                        scenario_name=scfg["name"],
+                        algorithm=algo_name,
+                    )
+                    sample_out_path = outdir / f"{sample_prefix}_scenario{scfg['id']}_{algo_name}_samples.csv.xz"
+                    full_sample_df_out.to_csv(sample_out_path, index=False, compression="xz")
+                    print(f"    - Saved {len(full_sample_df_out)} samples to {sample_out_path.name}")
 
-                        # Combine the in-memory weeks to get the sampled nodes
-                        all_samples_df = pd.concat(weeks_list, ignore_index=True)
-                        if all_samples_df.empty:
-                            continue
-
-                        # 1. Prepare Tip States
-                        # CRITICAL FIX: Use 'alias_pid' so the sample IDs match the Graph nodes exactly
-                        s_pid_col = "alias_pid" if "alias_pid" in all_samples_df.columns else "sim_pid"
+                # 2. Mugration Analysis
+                if args.abm_mugration is not None:
+                    if len(G_dir.nodes()) > 0 and len(alphabet) > 1:
+                        s_pid_col = "alias_pid" if "alias_pid" in full_sample_df.columns else "sim_pid"
                         
-                        if "county" in all_samples_df.columns:
-                            raw_tips = all_samples_df.set_index(s_pid_col)["county"].to_dict()
-                            # Clean the keys to ensure no floating point ".0" artifacts break the string match
+                        if "county" in full_sample_df.columns:
+                            raw_tips = full_sample_df.set_index(s_pid_col)["county"].to_dict()
                             known_tips = {str(k).replace(".0", ""): str(v) for k, v in raw_tips.items() if pd.notna(v)}
                         else:
-                            print(f"Warning: 'county' column missing in samples for {algo}. Skipping inference.")
+                            print(f"    - Warning: 'county' column missing in samples for {algo_name}. Skipping inference.")
                             continue
                             
-                        # 2. Run Inference
+                        # Run Inference
                         mug_res = mugration_station.simulate_inference_and_matrix(G_dir, known_tips, alphabet, sim_duration_years)
                         
-                        # 3. Save Output and Calculate Metrics
-                        sample_prefix = output_basename if output_basename else run_id
-                        mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{sid}_{algo}.json")
-
-                        algo_normalized_matrix = mugration_station.align_and_normalize_matrix(mug_res['models']['county']["transition_matrix"], mug_res['models']['county']["alphabet"], county_names)
-
+                        mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{scfg['id']}_{algo_name}.json")
+                        
+                        algo_normalized_matrix = mugration_station.align_and_normalize_matrix(
+                            mug_res['models']['county']["transition_matrix"], 
+                            mug_res['models']['county']["alphabet"], 
+                            county_names
+                        )
+                        
                         abm_flat = np.array(mugration_station.get_off_diagonals(normalized_epihiper_matrix, county_names))
                         run1_flat = np.array(mugration_station.get_off_diagonals(algo_normalized_matrix, county_names))
-
-                        # --- 1. Pearson Correlation (Keep for legacy/reference) ---
-                        r_1, _ = pearsonr(abm_flat, run1_flat)
-                        print(f"    - {algo} Pearson: {r_1:.4f}")
-
-                        # --- 2. Masked MAE ---
-                        # Only look at edges that exist in either the truth OR the prediction
-                        active_edges = (abm_flat > 0) | (run1_flat > 0)
-                        if np.sum(active_edges) > 0:
-                            masked_mae = np.mean(np.abs(abm_flat[active_edges] - run1_flat[active_edges]))
-                        else:
-                            masked_mae = 0.0
-                        print(f"    - {algo} Masked MAE (Active Routes Only): {masked_mae:.4f}")
                         
-                        # --- 3. Cosine Similarity ---
-                        # Cosine returns distance (0 is perfect), so we subtract from 1 for similarity
-                        if np.sum(abm_flat) > 0 and np.sum(run1_flat) > 0:
-                            cos_sim = 1.0 - cosine(abm_flat, run1_flat)
-                        else:
-                            cos_sim = 0.0 # Prevent division by zero if a matrix is totally empty
-                        print(f"    - {algo} Cosine Similarity: {cos_sim:.4f}")
-
-                        # --- 4. Topological F1-Score (Detection Accuracy) ---
+                        r_1, _ = pearsonr(abm_flat, run1_flat)
+                        print(f"    - {algo_name} Pearson: {r_1:.4f}")
+                        
+                        active_edges = (abm_flat > 0) | (run1_flat > 0)
+                        masked_mae = np.mean(np.abs(abm_flat[active_edges] - run1_flat[active_edges])) if np.sum(active_edges) > 0 else 0.0
+                        print(f"    - {algo_name} Masked MAE: {masked_mae:.4f}")
+                        
+                        cos_sim = 1.0 - cosine(abm_flat, run1_flat) if np.sum(abm_flat) > 0 and np.sum(run1_flat) > 0 else 0.0
+                        print(f"    - {algo_name} Cosine Similarity: {cos_sim:.4f}")
+                        
                         abm_binary = (abm_flat > 0).astype(int)
                         run1_binary = (run1_flat > 0).astype(int)
+                        f1 = f1_score(abm_binary, run1_binary, zero_division=0) if np.sum(abm_binary) > 0 or np.sum(run1_binary) > 0 else 1.0
+                        print(f"    - {algo_name} Topological F1-Score: {f1:.4f}")
                         
-                        # Prevent warning if both are all zeros
-                        if np.sum(abm_binary) == 0 and np.sum(run1_binary) == 0:
-                            f1 = 1.0 
-                        else:
-                            f1 = f1_score(abm_binary, run1_binary, zero_division=0)
-                        print(f"    - {algo} Topological F1-Score: {f1:.4f}")
                         mugration_rows.append({
-                            "algorithm": algo,
-                            "scenario_id": sid,
-                            "scenario_label": SCEN_LABELS.get(sid, scfg["name"]),
+                            "algorithm": algo_name,
+                            "scenario_id": scfg["id"],
+                            "scenario_label": label,
                             "pearson_r": r_1,
                             "masked_mae": masked_mae,
                             "cosine_similarity": cos_sim,
-                            "topological_f1": f1})
-                else:
-                    print("Warning: Graph is empty or no county mapping found. Skipping Mugration JSONs.")
+                            "topological_f1": f1
+                        })
+                        
+                        with open(mug_out_path, "w") as f:
+                            json.dump(mug_res, f, indent=2)
+                    else:
+                        print(f"    - Warning: Graph is empty or no county mapping found for {algo_name}. Skipping JSON.")
 
 
     marker_map = {1:"o", 2:"s", 3:"D", 4:"^", 5:"v", 6:">", 7:"P", 8:"X"}
