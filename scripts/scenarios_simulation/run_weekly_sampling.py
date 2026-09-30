@@ -95,9 +95,9 @@ def parse_args():
     )
 
     # ---- required inputs ----
-    ap.add_argument("--linelist", required=True,
+    ap.add_argument("--linelist", "-l", required=True,
                     help="Path to the linelist CSV.")
-    ap.add_argument("--population", required=True,
+    ap.add_argument("--population", "-p", required=True,
                     help="Path to the population traits file (skiprows=1).")
 
     # ---- target specification (new) ----
@@ -113,7 +113,8 @@ def parse_args():
     )
     ap.add_argument("--blend-alpha", type=float, default=BLEND_ALPHA,
                     help=f"Blend ratio for LL,P target (default: {BLEND_ALPHA}).")
-    ap.add_argument("--pool-window", type=int, default=4,
+    ap.add_argument("--time-budget", "--pool-window", dest="pool_window",
+                    type=int, default=4,
                     help="Rolling pool window in weeks (default: 4).")
     ap.add_argument(
         "--decision-window", type=int, default=None,
@@ -138,7 +139,7 @@ def parse_args():
 
     # ---- history ----
     ap.add_argument(
-        "--already-sequenced", dest="already_sequenced", default=None,
+        "--already-sequenced", "-g", dest="already_sequenced", default=None,
         help="Path to history CSV or directory of history files.",
     )
 
@@ -147,7 +148,7 @@ def parse_args():
                     help=f"Anchor date for weekly slicing. Default: {START_DATE_DEFAULT.date()}")
 
     # ---- sampling budget ----
-    ap.add_argument("--batch-size", type=int, help="Fixed weekly budget N.")
+    ap.add_argument("--batch-size", "-b", type=int, help="Fixed weekly budget N.")
     ap.add_argument("--batch-frac", type=float, help="Override batch_frac (0-1).")
     ap.add_argument("--batch-cap", type=int, help="Override batch_cap.")
     ap.add_argument("--min-per-group", type=int, help="Override min_per_group.")
@@ -161,6 +162,9 @@ def parse_args():
                     help=f"Date column name (default: {DATE_FIELD_DEFAULT}).")
 
     # ---- algorithms / stratifiers ----
+    ap.add_argument("--algorithm", dest="algorithms", action="append",
+                    help="Single algorithm (repeatable). Accepts the vision-document "
+                         "shorthand: SURS, LS (=LASSO-Stratified), LG (=LASSO-Greedy).")
     ap.add_argument("--algorithms", nargs="+", default=["surs", "stratified", "LASSO-Stratified"],
                     help="Algorithms to run.")
     ap.add_argument("--stratifiers", nargs="+", default=["age", "race", "county", "sex"],
@@ -171,7 +175,13 @@ def parse_args():
                     help="Output directory (default: weekly_results).")
     ap.add_argument("--seed", type=int, default=42, help="Random seed.")
 
-    return ap.parse_args()
+    args = ap.parse_args()
+
+    # Vision-document shorthand for algorithm names.
+    _SHORTHAND = {"ls": "LASSO-Stratified", "lg": "LASSO-Greedy", "surs": "SURS"}
+    if args.algorithms:
+        args.algorithms = [_SHORTHAND.get(a.lower(), a) for a in args.algorithms]
+    return args
 
 
 # =====================================================================

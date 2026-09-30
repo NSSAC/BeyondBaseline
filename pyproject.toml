@@ -19,6 +19,18 @@ dependencies = [
 ]
 
 [project.scripts]
+# --- Primary run modes (see vision: operational vs research) --------------
+# Operational: one decision, one week, for a health department working from a
+# real linelist. No ABM or digital twin required.
+beyond-baseline = "scenarios_simulation.run_weekly_sampling:main"
+# Research: sweep many scenarios x algorithms over simulated data.
+beyond-baseline-sweep = "scenarios_simulation.run_all_scenarios:main"
+beyond-baseline-replicates = "scenarios_simulation.run_replicates:main"
+beyond-baseline-aggregate = "scenarios_simulation.aggregate_results:main"
+beyond-baseline-lasso-greedy = "scenarios_simulation.lasso_test.lasso_test_greedy:main"
+beyond-baseline-lasso-stratified = "scenarios_simulation.lasso_test.lasso_test_stratified:main"
+
+# --- Deprecated aliases (kept so existing sbatch scripts keep working) ----
 scenarios-runner = "scenarios_simulation.run_all_scenarios:main"
 scenarios-weekly = "scenarios_simulation.run_weekly_sampling:main"
 scenarios-replicates = "scenarios_simulation.run_replicates:main"
