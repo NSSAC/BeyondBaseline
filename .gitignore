@@ -1,0 +1,33 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+venv/
+
+# OS cruft
+.DS_Store
+
+# --- Run artifacts -------------------------------------------------------
+# Scenario sweeps write large result trees. Regenerable; must not enter git.
+replicate_results/
+replicate_results_*/
+scenario_runs/
+weekly_results/
+lasso_greedy*/
+lasso_stratified*/
+analysis/replicate_results/
+analysis/lasso_greedy*/
+*.tar.gz
+
+# SLURM logs
+sim_replicates_*.out.txt
+slurm-*.out
+*.sbatch.out
+
+# Stray scratch files
+z
