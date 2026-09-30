@@ -50,7 +50,8 @@ def parse_args():
     ap.add_argument("--outname", default=None, help="Optional basename prefix for all output files.")
     ap.add_argument("--seed", type=int, default=42, help="Global random seed (default: 42)")
     ap.add_argument("--roll-win-inf", type=int, default=4, help="Rolling window (weeks) for infections Plot 3 (default: 4)")
-    ap.add_argument("--abm_mugration",  required=False, help="Mugration file to be compared to. If set, enables generation of mugration file for selected scenario/algorithm")
+    ap.add_argument("--abm_mugration", required=False,
+                    help=argparse.SUPPRESS)  # removed: see cste_instructions.txt
 
     # ---- Sampling budget overrides ----
     ap.add_argument("--batch-size", type=int,
@@ -93,7 +94,18 @@ def parse_args():
             "Default: age race county sex"),
     )
 
-    return ap.parse_args()
+    args = ap.parse_args()
+
+    if getattr(args, "abm_mugration", None):
+        ap.error(
+            "--abm_mugration was removed; mugration benchmarking now lives in PhyloGAS.\n"
+            "  Equivalent two-command workflow:\n"
+            "    beyond-baseline-sweep ... --save-samples --outdir runs/\n"
+            "    phylogas benchmark mugration --truth <abm.json> \\\n"
+            "        --samples 'runs/*_samples.csv.xz' --infections <allevents.csv.xz>\n"
+            "  See cste_instructions.txt."
+        )
+    return args
 
 # --------- algorithm selection helpers ---------
 # Map common aliases (case-insensitive) to registry keys
@@ -870,7 +882,6 @@ def main():
     total_algo_time   = {algo: 0.0 for algo in ALG.keys()}
     count_algo_runs   = {algo: 0   for algo in ALG.keys()}
     kl_rows = []  # accumulate per-week KL points across all panels (A/B/C)
-    mugration_rows = []  # accumulate per-week mugration points
     all_weekly_hist = {} # This will be populated to replace the replay loop
     all_weekly_samples = {}  # scenario_id -> {algo -> [DataFrame per week]}
 
@@ -887,171 +898,10 @@ def main():
         variant_col="variant_label",
     )
 
-    if args.abm_mugration != None:
-        import mugration_station
-        print("Mugration analysis")
-        county_names, epihiper_matrix = mugration_station.read_traits_json(args.abm_mugration)
-        normalized_epihiper_matrix = mugration_station.align_and_normalize_matrix(epihiper_matrix, county_names, county_names)
-
-        print("\nBuilding directed transmission graph for Mugration analysis...")
-        pid_col = "alias_pid" if "alias_pid" in full_inf_df.columns else "sim_pid"
-        G_dir = mugration_station.build_directed_graph(full_inf_df, pid_col=pid_col, contact_col="alias_contact")
-        
-        # Establish mapping and alphabet using the full infection list instead of pop_df
-        # This guarantees consistent matrix dimensions across all scenarios based on the true outbreak
-        if "county" in full_inf_df.columns:
-            unique_counties = sorted([str(c) for c in full_inf_df['county'].dropna().unique()])
-        else:
-            unique_counties = []
-            
-        alphabet = [""] + unique_counties
-        sim_duration_years = len(weekly_ll_hist) / 52.1429
-    
-    scenario_ids = [scfg["id"] for scfg in SCENARIOS]
-    scenario_cfg_map = {scfg["id"]: scfg for scfg in SCENARIOS}
-    algo_list  = list(ALG.keys())
-    n_algo    = len(algo_list)
-
-
-    
-    for scfg in SCENARIOS:
-        label = SCEN_LABELS.get(scfg["id"], "")
-        print(f"\n=== Running {scfg['name']} [{label}] ===")
-        weekly_hist, per_algo_eval, per_algo_time, weekly_samples, algo_state = run_one_scenario(
-            line_df, args.date_field, POP_DIST_STATIC, weekly_ll_hist,
-            scfg, rng_master, start_date, args.min_pool, overrides, algorithms=ALG
-        )
-
-        # --- FINAL PRINT FOR THIS SCENARIO ---
-        print(f"--- Results for {scfg['name']} [{label}] ---")
-        for algo_name, sample_weeks_list in weekly_hist.items():
-            # Sum up the total samples from all weeks
-            total_samples = sum(s.sum() for s in sample_weeks_list)
-            num_weeks = len(sample_weeks_list)
-
-            avg_per_week = total_samples / num_weeks if num_weeks > 0 else 0
-            
-            print(f"  > Algorithm: {algo_name:<15} | Total Samples: {int(total_samples):<6} | "
-                  f"Weeks Run: {num_weeks:<3} | Avg/Week: {avg_per_week:.1f}")
-        # -------------------------------------
-
-        all_weekly_hist[scfg["id"]] = weekly_hist
-        all_weekly_samples[scfg["id"]] = weekly_samples
-
-        # save per-scenario CSV + collect for final plots
-        rows = []
-        for algo, ys in per_algo_eval.items():
-            if scfg["id"] in (4, 5, 6):
-                label = f"{algo} Mean KL"
-            elif scfg["eval_metric"] == "kl_vs_linelist_rolling":
-                label = f"{algo} (Rolling {scfg.get('eval_window_weeks',4)}-Week KL)"
-            elif scfg["eval_metric"] == "kl_vs_population_cum":
-                label = f"{algo} vs. Population"
-            else:
-                label = f"{algo} vs. Line List"
-            eval_weeks = evaluation_week_numbers(scfg, len(ys))
-            for week_num, v in zip(eval_weeks, ys):
-                rows.append({"scenario": scfg["id"], "label": label, "week": week_num, "kl": float(v)})
-                # Panel A ("targets"): save KL per week
-                kl_rows.append({
-                    "run_id": run_id,
-                    "linelist_id": linelist_id,
-                    "algorithm": algo,
-                    "scenario_id": scfg["id"],
-                    "scenario_label": label,
-                    "eval_type": "A_targets",
-                    "roll_window": None,
-                    "week": week_num,
-                    "kl": float(v),
-                })
-            scenario_series[algo][scfg["id"]] = (eval_weeks, ys)
-            total_algo_time[algo] += per_algo_time.get(algo, 0.0)
-            count_algo_runs[algo] += 1
-
-        for algo, secs in per_algo_time.items():
-            print(f"  {algo} time: {secs:.2f}s")
-
-# --- POST-PROCESSING FOR THIS SCENARIO (SAMPLES & MUGRATION) ---
-        label = SCEN_LABELS.get(scfg["id"], scfg["name"])
-        if args.save_samples or args.abm_mugration is not None:
-            print(f"  Processing outputs (Samples & Mugration) for {scfg['name']} [{label}]...")
-            
-            for algo_name, sample_weeks_list in weekly_samples.items():
-                if not sample_weeks_list:
-                    continue
-
-                full_sample_df = pd.concat(sample_weeks_list, ignore_index=True)
-                sample_prefix = output_basename if output_basename else run_id
-                
-                # 1. Save Samples
-                if args.save_samples:
-                    full_sample_df_out = full_sample_df.assign(
-                        run_id=run_id,
-                        linelist_id=linelist_id,
-                        scenario_id=scfg["id"],
-                        scenario_name=scfg["name"],
-                        algorithm=algo_name,
-                    )
-                    sample_out_path = outdir / f"{sample_prefix}_scenario{scfg['id']}_{algo_name}_samples.csv.xz"
-                    full_sample_df_out.to_csv(sample_out_path, index=False, compression="xz")
-                    print(f"    - Saved {len(full_sample_df_out)} samples to {sample_out_path.name}")
-
-                # 2. Mugration Analysis
-                if args.abm_mugration is not None:
-                    if len(G_dir.nodes()) > 0 and len(alphabet) > 1:
-                        s_pid_col = "alias_pid" if "alias_pid" in full_sample_df.columns else "sim_pid"
-                        
-                        if "county" in full_sample_df.columns:
-                            raw_tips = full_sample_df.set_index(s_pid_col)["county"].to_dict()
-                            known_tips = {str(k).replace(".0", ""): str(v) for k, v in raw_tips.items() if pd.notna(v)}
-                        else:
-                            print(f"    - Warning: 'county' column missing in samples for {algo_name}. Skipping inference.")
-                            continue
-                            
-                        # Run Inference
-                        mug_res = mugration_station.simulate_inference_and_matrix(G_dir, known_tips, alphabet, sim_duration_years)
-                        
-                        mug_out_path = out_path(f"abmugration_{sample_prefix}_scenario{scfg['id']}_{algo_name}.json")
-                        
-                        algo_normalized_matrix = mugration_station.align_and_normalize_matrix(
-                            mug_res['models']['county']["transition_matrix"], 
-                            mug_res['models']['county']["alphabet"], 
-                            county_names
-                        )
-                        
-                        abm_flat = np.array(mugration_station.get_off_diagonals(normalized_epihiper_matrix, county_names))
-                        run1_flat = np.array(mugration_station.get_off_diagonals(algo_normalized_matrix, county_names))
-                        
-                        r_1, _ = pearsonr(abm_flat, run1_flat)
-                        print(f"    - {algo_name} Pearson: {r_1:.4f}")
-                        
-                        active_edges = (abm_flat > 0) | (run1_flat > 0)
-                        masked_mae = np.mean(np.abs(abm_flat[active_edges] - run1_flat[active_edges])) if np.sum(active_edges) > 0 else 0.0
-                        print(f"    - {algo_name} Masked MAE: {masked_mae:.4f}")
-                        
-                        cos_sim = 1.0 - cosine(abm_flat, run1_flat) if np.sum(abm_flat) > 0 and np.sum(run1_flat) > 0 else 0.0
-                        print(f"    - {algo_name} Cosine Similarity: {cos_sim:.4f}")
-                        
-                        abm_binary = (abm_flat > 0).astype(int)
-                        run1_binary = (run1_flat > 0).astype(int)
-                        f1 = f1_score(abm_binary, run1_binary, zero_division=0) if np.sum(abm_binary) > 0 or np.sum(run1_binary) > 0 else 1.0
-                        print(f"    - {algo_name} Topological F1-Score: {f1:.4f}")
-                        
-                        mugration_rows.append({
-                            "algorithm": algo_name,
-                            "scenario_id": scfg["id"],
-                            "scenario_label": label,
-                            "pearson_r": r_1,
-                            "masked_mae": masked_mae,
-                            "cosine_similarity": cos_sim,
-                            "topological_f1": f1
-                        })
-                        
-                        with open(mug_out_path, "w") as f:
-                            json.dump(mug_res, f, indent=2)
-                    else:
-                        print(f"    - Warning: Graph is empty or no county mapping found for {algo_name}. Skipping JSON.")
-
+    # NOTE: mugration benchmarking moved to PhyloGAS (clean break, 2026-09-30).
+    # It required ABM ground truth (--infections + --abm_mugration), which a
+    # health department running on a real linelist does not have. See
+    # cste_instructions.txt for the equivalent two-command workflow.
 
     marker_map = {1:"o", 2:"s", 3:"D", 4:"^", 5:"v", 6:">", 7:"P", 8:"X"}
 
@@ -1779,11 +1629,6 @@ def main():
                         f"(AUC={r['auc']:.4f}, weeks={int(r['weeks'])})")
         else:
             print("\n[Error] 'eval_type' missing from AUC results. Check metric calculations.")
-    if mugration_rows:
-        mug_df = pd.DataFrame(mugration_rows)
-        mug_out = out_path("Mugration_Metrics.csv")
-        mug_df.to_csv(mug_out, index=False)
-        print(f"Saved Mugration Metrics: {mug_out}")
 
     # print top results per evaluation to console
     # for et in auc_df["eval_type"].unique():
