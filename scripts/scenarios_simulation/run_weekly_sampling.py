@@ -42,25 +42,46 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from scenarios_config import (
-    SCENARIOS,
-    DATE_FIELD_DEFAULT,
-    START_DATE_DEFAULT,
-    MINIMUM_POOL_SIZE_DEFAULT,
-    BATCH_FRAC_DEFAULT,
-    BATCH_CAP_DEFAULT,
-    MIN_PER_GROUP_DEFAULT,
-    BLEND_ALPHA,
-)
-from sampling_algorithms import ALGORITHMS as REGISTRY, make_group, kl_dist
-from run_all_scenarios import (
-    normalize_age_group_col,
-    linelist_dist_at_week,
-    blended_target,
-    select_algorithms,
-    _normalize_stratifiers,
-    SCEN_LABELS,
-)
+try:
+    from .scenarios_config import (
+        SCENARIOS,
+        DATE_FIELD_DEFAULT,
+        START_DATE_DEFAULT,
+        MINIMUM_POOL_SIZE_DEFAULT,
+        BATCH_FRAC_DEFAULT,
+        BATCH_CAP_DEFAULT,
+        MIN_PER_GROUP_DEFAULT,
+        BLEND_ALPHA,
+    )
+    from .sampling_algorithms import ALGORITHMS as REGISTRY, make_group, kl_dist
+    from .run_all_scenarios import (
+        normalize_age_group_col,
+        linelist_dist_at_week,
+        blended_target,
+        select_algorithms,
+        _normalize_stratifiers,
+        SCEN_LABELS,
+    )
+except ImportError:
+    from scenarios_config import (
+        SCENARIOS,
+        DATE_FIELD_DEFAULT,
+        START_DATE_DEFAULT,
+        MINIMUM_POOL_SIZE_DEFAULT,
+        BATCH_FRAC_DEFAULT,
+        BATCH_CAP_DEFAULT,
+        MIN_PER_GROUP_DEFAULT,
+        BLEND_ALPHA,
+    )
+    from sampling_algorithms import ALGORITHMS as REGISTRY, make_group, kl_dist
+    from run_all_scenarios import (
+        normalize_age_group_col,
+        linelist_dist_at_week,
+        blended_target,
+        select_algorithms,
+        _normalize_stratifiers,
+        SCEN_LABELS,
+    )
 
 
 # =====================================================================

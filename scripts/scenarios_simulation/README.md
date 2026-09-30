@@ -18,10 +18,28 @@ It loads a synthetic linelist and population file, runs all 8 scenarios in one g
   - `scipy`
   - `matplotlib`
 
+## Install
 
-# Run similation with:
+From the repository root:
+
 ```bash
-python3 run_all_scenarios.py \
+pip install -e .
+```
+
+This installs the scenarios CLI commands defined in `pyproject.toml`.
+
+## Validate CLI Installation
+
+From the repository root:
+
+```bash
+python3 scripts/scenarios_simulation/verify_cli_entrypoints.py
+```
+
+
+# Run simulation with:
+```bash
+scenarios-runner \
   --linelist ../data/linelist.csv.xz \
   --population ../../va_persontrait_epihiper.csv \
   --infections ../data/linelist_allevents.csv.xz \
@@ -36,17 +54,17 @@ python3 run_all_scenarios.py \
 
 # Run replicates test with:
 ```bash
-python3 run_replicates.py \
+scenarios-replicates \
   --replicates-dir ../data/replicate \
   --population ../../va_persontrait_epihiper.csv
 
 # if you want uncertainty
-python3 plot_kl_uncertainty.py --root scenario_runs --outdir result_graphs
+# Note: plot_kl_uncertainty.py is referenced here but is not present in this repository snapshot.
 ```
 
 # Run lasso test with:
 ```bash
-python3 lasso_test_greedy.py \
+scenarios-lasso-greedy \
   --linelist ../results/replicate_0/linelist.csv.xz \
   --population va_persontrait_epihiper.csv \
   --infections ../results/replicate_0/linelist_allevents.csv.xz \
@@ -57,12 +75,31 @@ python3 lasso_test_greedy.py \
   --max-group-size 500 \
   --step-group-size 50 \
   --seed 42
+
+scenarios-lasso-stratified \
+  --linelist ../results/replicate_0/linelist.csv.xz \
+  --population va_persontrait_epihiper.csv \
+  --infections ../results/replicate_0/linelist_allevents.csv.xz \
+  --stratifiers age race county sex ses \
+  --outdir lasso_stratified_50-500 \
+  --batch-size 100 \
+  --min-group-size 50 \
+  --max-group-size 500 \
+  --step-group-size 50 \
+  --seed 42
+```
+
+# Aggregate metrics across replicate outputs:
+```bash
+scenarios-aggregate \
+  --input-dir replicate_results \
+  --outdir replicate_results
 ```
 
 # Run lite version with:
 ```bash
 # week 1:
-python3 run_weekly_sampling.py \
+scenarios-weekly \
   --linelist ../data/linelist.csv \
   --population ../../va_persontrait_epihiper.txt \
   --target "LL" \
@@ -72,7 +109,7 @@ python3 run_weekly_sampling.py \
   --no-replacement
 
 # week 2:
-python3 run_weekly_sampling.py \
+scenarios-weekly \
   --linelist ../data/linelist.csv \
   --population ../../va_persontrait_epihiper.txt \
   --already-sequenced weekly_results/ \

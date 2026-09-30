@@ -15,14 +15,24 @@ import seaborn as sns
 from scipy.spatial.distance import cosine
 from sklearn.metrics import f1_score
 
-from scenarios_config import (
-    SCENARIOS,
-    GROUP_FEATURES,
-    DATE_FIELD_DEFAULT,
-    START_DATE_DEFAULT,
-    MINIMUM_POOL_SIZE_DEFAULT,
-)
-from sampling_algorithms import make_group, kl_dist, ALGORITHMS as REGISTRY
+try:
+    from .scenarios_config import (
+        SCENARIOS,
+        GROUP_FEATURES,
+        DATE_FIELD_DEFAULT,
+        START_DATE_DEFAULT,
+        MINIMUM_POOL_SIZE_DEFAULT,
+    )
+    from .sampling_algorithms import make_group, kl_dist, ALGORITHMS as REGISTRY
+except ImportError:
+    from scenarios_config import (
+        SCENARIOS,
+        GROUP_FEATURES,
+        DATE_FIELD_DEFAULT,
+        START_DATE_DEFAULT,
+        MINIMUM_POOL_SIZE_DEFAULT,
+    )
+    from sampling_algorithms import make_group, kl_dist, ALGORITHMS as REGISTRY
 
 
 # ----------------- CLI -----------------

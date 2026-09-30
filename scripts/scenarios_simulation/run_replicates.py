@@ -45,7 +45,7 @@ def main():
         
         # Build the command using the same Python interpreter currently running
         cmd = [
-            sys.executable, "run_all_scenarios.py",
+            sys.executable, "-m", "scenarios_simulation.run_all_scenarios",
             "--linelist", str(linelist_path),
             "--population", args.population,
             "--infections", str(infections_path),

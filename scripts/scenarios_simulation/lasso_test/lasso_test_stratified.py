@@ -25,25 +25,46 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from run_all_scenarios import (
-    _normalize_stratifiers,
-    build_undirected_adj,
-    build_weekly_infections,
-    build_weekly_variant_counts,
-    calculate_coverage_score,
-    load_linelist_and_population,
-    precompute_component_sizes,
-    run_one_scenario,
-    sampling_stride_weeks,
-)
-from scenarios_config import (
-    SCENARIOS,
-    DATE_FIELD_DEFAULT,
-    START_DATE_DEFAULT,
-    MINIMUM_POOL_SIZE_DEFAULT,
-)
-from sampling_algorithms import ALGORITHMS as REGISTRY
-from sampling_algorithms import kl_dist
+try:
+    from ..run_all_scenarios import (
+        _normalize_stratifiers,
+        build_undirected_adj,
+        build_weekly_infections,
+        build_weekly_variant_counts,
+        calculate_coverage_score,
+        load_linelist_and_population,
+        precompute_component_sizes,
+        run_one_scenario,
+        sampling_stride_weeks,
+    )
+    from ..scenarios_config import (
+        SCENARIOS,
+        DATE_FIELD_DEFAULT,
+        START_DATE_DEFAULT,
+        MINIMUM_POOL_SIZE_DEFAULT,
+    )
+    from ..sampling_algorithms import ALGORITHMS as REGISTRY
+    from ..sampling_algorithms import kl_dist
+except ImportError:
+    from run_all_scenarios import (
+        _normalize_stratifiers,
+        build_undirected_adj,
+        build_weekly_infections,
+        build_weekly_variant_counts,
+        calculate_coverage_score,
+        load_linelist_and_population,
+        precompute_component_sizes,
+        run_one_scenario,
+        sampling_stride_weeks,
+    )
+    from scenarios_config import (
+        SCENARIOS,
+        DATE_FIELD_DEFAULT,
+        START_DATE_DEFAULT,
+        MINIMUM_POOL_SIZE_DEFAULT,
+    )
+    from sampling_algorithms import ALGORITHMS as REGISTRY
+    from sampling_algorithms import kl_dist
 
 
 LASSO_KEY_DEFAULT = "LASSO-Stratified"

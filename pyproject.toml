@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "beyond-baseline"
+version = "0.1.0"
+description = "Scenario sampling runners and evaluation workflows for BeyondBaseline"
+readme = "scripts/scenarios_simulation/README.md"
+requires-python = ">=3.8"
+dependencies = [
+  "numpy>=1.21",
+  "pandas>=1.4",
+  "scipy>=1.8",
+  "matplotlib>=3.5",
+  "seaborn>=0.12",
+  "scikit-learn>=1.1",
+  "networkx>=2.8",
+]
+
+[project.scripts]
+scenarios-runner = "scenarios_simulation.run_all_scenarios:main"
+scenarios-weekly = "scenarios_simulation.run_weekly_sampling:main"
+scenarios-replicates = "scenarios_simulation.run_replicates:main"
+scenarios-lasso-greedy = "scenarios_simulation.lasso_test.lasso_test_greedy:main"
+scenarios-lasso-stratified = "scenarios_simulation.lasso_test.lasso_test_stratified:main"
+scenarios-aggregate = "scenarios_simulation.aggregate_results:main"
+
+[tool.setuptools]
+package-dir = {"" = "scripts"}
+
+[tool.setuptools.packages.find]
+where = ["scripts"]
+include = ["scenarios_simulation*"]
+exclude = ["scenarios_simulation.analysis*", "scenarios_simulation.replicate_results*"]
