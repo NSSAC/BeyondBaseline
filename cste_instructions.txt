@@ -1,0 +1,208 @@
+===============================================================================
+ Reproducing the CSTE / PNAS analysis after the BeyondBaseline / PhyloGAS split
+===============================================================================
+
+ Written 2026-09-30, at the commit that removed ABM-truth benchmarking from
+ this repository.
+
+ WHAT CHANGED
+ ------------
+ Benchmarking that requires agent-based-model ground truth moved to PhyloGAS.
+ Sample *selection* stayed here.
+
+ The reason is the operational use case: a health department runs
+ BeyondBaseline on a real linelist, with no EpiHiper run, no digital twin, and
+ no ground truth. Previously `run_all_scenarios.py` demanded `--infections`
+ (the ABM all-events file) even to compute purely demographic metrics, so the
+ tool could not be used that way at all.
+
+ Nothing was deleted. Everything moved is in PhyloGAS and produces bit-identical
+ numbers -- verified against Data/test_mugration/ before and after the move:
+
+     pearson_r          0.4806705479  ->  0.4806705479
+     masked_mae         0.0112385284  ->  0.0112385284
+     cosine_similarity  0.4919380738  ->  0.4919380738
+     topological_f1     0.6096376841  ->  0.6096376841
+
+
+ WHO OWNS WHAT NOW
+ -----------------
+   metric / artefact                        produced by
+   ---------------------------------------- ------------------------------
+   KL vs census (P)                         beyond-baseline-sweep
+   KL vs linelist (LL)                      beyond-baseline-sweep
+   KL vs blended (LL,P)                     beyond-baseline-sweep
+   Coverage / Mean Reciprocal Distance      beyond-baseline-sweep
+   AUC_rankings.csv                         beyond-baseline-sweep   (unchanged)
+   KL_series.csv                            beyond-baseline-sweep   (unchanged)
+   *_samples.csv.xz                         beyond-baseline-sweep   (unchanged)
+   ---------------------------------------- ------------------------------
+   Mugration_Metrics.csv                    phylogas benchmark mugration
+   abmugration_*.json                       phylogas benchmark mugration
+   Aggregated_Mugration_Metrics.csv         phylogas benchmark mugration
+   parent->child divergence                 phylogas benchmark sequence
+   simulated-vs-augur comparison            phylogas benchmark compare
+
+
+ INSTALLATION
+ ------------
+   pip install -e .                                    # BeyondBaseline
+   pip install -e /path/to/PhyloGAS                    # PhyloGAS
+   # PhyloGAS hard-depends on BeyondBaseline, so installing PhyloGAS from
+   # GitHub pulls this repo automatically.
+
+
+===============================================================================
+ 1. THE SWEEP  (what used to be one command, now two)
+===============================================================================
+
+ BEFORE
+ ------
+   python3 run_all_scenarios.py \
+     --linelist      .../replicate_0/linelist.csv.xz \
+     --population    .../va_persontrait_epihiper.txt \
+     --infections    .../replicate_0/linelist_allevents.csv.xz \
+     --abm_mugration .../replicate_0/linelist_mugration.json \
+     --outdir        scenario_runs/replicate_0/batch_400 \
+     --batch-size 400 --no-replacement --seed 42 --save-samples \
+     --algorithms surs stratified LASSO-Greedy LASSO-Stratified \
+     --stratifiers age race county sex
+
+ AFTER
+ -----
+   # step 1 -- selection (this repo)
+   beyond-baseline-sweep \
+     --linelist   .../replicate_0/linelist.csv.xz \
+     --population .../va_persontrait_epihiper.txt \
+     --infections .../replicate_0/linelist_allevents.csv.xz \
+     --outdir     scenario_runs/replicate_0/batch_400 \
+     --batch-size 400 --no-replacement --seed 42 --save-samples \
+     --algorithms surs stratified LASSO-Greedy LASSO-Stratified \
+     --stratifiers age race county sex
+
+   # step 2 -- benchmarking (PhyloGAS)
+   phylogas benchmark mugration \
+     --truth      .../replicate_0/linelist_mugration.json \
+     --samples    'scenario_runs/replicate_0/batch_400/*_samples.csv.xz' \
+     --infections .../replicate_0/linelist_allevents.csv.xz \
+     --out        scenario_runs/replicate_0/batch_400/Mugration_Metrics.csv \
+     --save-matrices scenario_runs/replicate_0/batch_400/
+
+ OR, both in one command:
+
+   phylogas compare-strategies \
+     --truth      .../replicate_0/linelist_mugration.json \
+     --infections .../replicate_0/linelist_allevents.csv.xz \
+     --linelist   .../replicate_0/linelist.csv.xz \
+     --population .../va_persontrait_epihiper.txt \
+     --algorithms surs stratified LASSO-Greedy LASSO-Stratified \
+     --stratifiers age race county sex \
+     --batch-size 400 --no-replacement \
+     --outdir     scenario_runs/replicate_0/batch_400 \
+     --out        scenario_runs/replicate_0/batch_400/strategy_comparison.csv
+
+ `compare-strategies` shells out to `beyond-baseline-sweep`, then scores every
+ saved sample set in a single pass. The transmission graph is built once for
+ all strategies, so batching costs no more than the old inline version.
+
+ Cost note: splitting adds one extra read of the all-events file plus one graph
+ rebuild -- about 2-3 s for a 300k-row file. The move also switched that read
+ from `sep=None, engine="python"` to the C parser, which is ~2.8x faster and
+ roughly cancels the overhead.
+
+ Output column names are unchanged (pearson_r, masked_mae, cosine_similarity,
+ topological_f1), with these additions: label, samples_file, n_samples, n_tips,
+ n_edges_truth, n_edges_inferred. Rows sort by cosine_similarity descending.
+
+
+===============================================================================
+ 2. REPLICATES
+===============================================================================
+
+ BEFORE
+   python3 run_replicates.py --replicates-dir ../data/replicate \
+                             --population va_persontrait_epihiper.txt
+   python3 aggregate_results.py --input-dir replicate_results \
+                                --outdir replicate_results
+
+ AFTER
+   beyond-baseline-replicates --replicates-dir ../data/replicate \
+                              --population va_persontrait_epihiper.txt
+
+   # per-replicate mugration scoring
+   for r in replicate_results/replicate_*; do
+     phylogas benchmark mugration \
+       --truth      "../data/replicate/$(basename $r)/linelist_mugration.json" \
+       --samples    "$r/*_samples.csv.xz" \
+       --infections "../data/replicate/$(basename $r)/linelist_allevents.csv.xz" \
+       --out        "$r/Mugration_Metrics.csv"
+   done
+
+   # AUC aggregation is unchanged and still lives here
+   beyond-baseline-aggregate --input-dir replicate_results --outdir replicate_results
+
+ `beyond-baseline-aggregate` still finds Mugration_Metrics.csv if PhyloGAS has
+ written it into each replicate directory -- the filename and schema match.
+
+
+===============================================================================
+ 3. NOTEBOOK UPDATES  (analysis/cste_and_beyond.ipynb)
+===============================================================================
+
+ The notebook reads:
+     replicate_*/AUC_rankings.csv          <- unchanged, still written here
+     replicate_*/Mugration_Metrics.csv     <- now written by PhyloGAS
+     *_scenario{N}_{ALGO}_samples.csv.xz   <- unchanged, still written here
+
+ So the only requirement is that `phylogas benchmark mugration --out` writes
+ Mugration_Metrics.csv into the same per-replicate directory the sweep used.
+ If you follow the loop in section 2, no notebook edits are needed.
+
+ If you prefer PhyloGAS's richer output, `strategy_comparison.csv` carries the
+ same four metrics plus per-strategy sample counts.
+
+
+===============================================================================
+ 4. NEW CAPABILITY: simulated parsimony vs real phylogenetic inference
+===============================================================================
+
+ This was not possible before the split, and addresses the outline item
+ "confirmation of the estimation of mugration through nextstrain".
+
+   phylogas benchmark compare \
+     --truth     linelist_mugration.json \
+     --simulated abmugration_scenario1_SURS.json \
+     --augur     run_03_vadelta_SURS_traits.json \
+     --out       inference_gap.csv
+
+ Row 1 scores bottom-up parsimony on the sampled tips, with perfect knowledge
+ of the transmission tree. Row 2 scores `augur traits` on the actual painted
+ sequences for the same samples.
+
+ The gap between them is the cost of real phylogenetic reconstruction: tree
+ inference error, plus contamination from lineages that were never sampled.
+ A negative cosine delta means sequence-based inference loses signal relative
+ to perfect-knowledge parsimony.
+
+
+===============================================================================
+ 5. QUICK REFERENCE
+===============================================================================
+
+   operational (health department, real linelist, no ABM):
+     beyond-baseline -l linelist.csv -g already_sequenced.csv -p population.txt \
+         -b 400 --time-budget 4 --current-date 2021-07-12 \
+         --algorithm SURS --target "LL,P" > recommendation.txt
+
+   research (sweep many strategies over simulated data):
+     beyond-baseline-sweep --linelist ... --population ... --save-samples ...
+
+   benchmarking (requires ABM truth, lives in PhyloGAS):
+     phylogas benchmark mugration ...
+     phylogas benchmark sequence ...
+     phylogas benchmark compare ...
+     phylogas compare-strategies ...
+
+   deprecated aliases, still functional:
+     scenarios-runner, scenarios-weekly, scenarios-replicates,
+     scenarios-aggregate, scenarios-lasso-greedy, scenarios-lasso-stratified
