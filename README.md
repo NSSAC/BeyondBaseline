@@ -126,12 +126,6 @@ beyond-baseline -l linelist.csv -p population.txt -b 400 \
 
 ### Why not just use SURS?
 
-Enforcing strict demographic quotas corrects ascertainment bias, but it also
-severs transmission links — you end up with a demographically tidy sample that
-cannot see how the pathogen is actually moving between places. The LASSO
-methods target this directly, using sparse risk modelling to find
-high-leverage "boundary" cases that connect otherwise separate groups.
-
 That trade-off between demographic equity and topological visibility is what
 this software exists to navigate.
 
