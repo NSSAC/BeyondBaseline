@@ -3,18 +3,23 @@
 lasso_test.py
 
 Sweep LASSO subgroup count (max_supergroups / cluster_bins) and evaluate:
-    - mean weekly KL(sample || own target)
-    - panel B
-    - panel C
-    - panel E
-    - panel F
-    - panel K
-    - panel M
+    - mean weekly KL(sample || own target)          [line list only]
+    - cumulative_infections                         [needs --infections]
+    - stride_window_infections                      [needs --infections]
+    - stride_variant_prevalence_error               [needs --infections]
+    - stride_component_coverage                     [needs a contact graph]
+    - coverage_size_100                             [needs a contact graph]
+    - 8_week_rolling_tree_coverage                  [needs a contact graph]
+
+The sweep itself only needs the line list. Everything in brackets is a
+ground-truth metric computed by PhyloGAS; without PhyloGAS installed, or
+without --infections, the sweep still runs and those columns are skipped.
+See ../eval_names.py for what each metric measures.
 
 Outputs:
     - CSV:  lasso_all_scenarios_mean_kl_vs_own_target.csv
     - Plot: lasso_all_scenarios_mean_kl_vs_own_target.png
-    - CSV/Plot pairs for B, C, E, F, K, M
+    - a CSV/plot pair per metric listed above, named after the metric
 """
 
 from __future__ import annotations
@@ -29,11 +34,8 @@ try:
     from ..run_all_scenarios import (
         _normalize_stratifiers,
         build_undirected_adj,
-        build_weekly_infections,
-        build_weekly_variant_counts,
         calculate_coverage_score,
         load_linelist_and_population,
-        precompute_component_sizes,
         run_one_scenario,
         sampling_stride_weeks,
     )
@@ -49,11 +51,8 @@ except ImportError:
     from run_all_scenarios import (
         _normalize_stratifiers,
         build_undirected_adj,
-        build_weekly_infections,
-        build_weekly_variant_counts,
         calculate_coverage_score,
         load_linelist_and_population,
-        precompute_component_sizes,
         run_one_scenario,
         sampling_stride_weeks,
     )
@@ -65,6 +64,23 @@ except ImportError:
     )
     from sampling_algorithms import ALGORITHMS as REGISTRY
     from sampling_algorithms import kl_dist
+
+# Ground-truth metrics live in PhyloGAS, which needs the ABM's true infection
+# counts and transmission graph. BeyondBaseline must stay runnable without it,
+# so this import is optional and the metrics it feeds are gated on _HAVE_TRUTH.
+try:
+    from phylogas.benchmark.truth_metrics import (
+        build_weekly_infections,
+        build_weekly_variant_counts,
+        precompute_component_sizes,
+    )
+    _HAVE_TRUTH = True
+except ImportError:
+    build_weekly_infections = None
+    build_weekly_variant_counts = None
+    precompute_component_sizes = None
+    _HAVE_TRUTH = False
+
 
 
 LASSO_KEY_DEFAULT = "LASSO-Greedy"
@@ -92,52 +108,52 @@ METRIC_CONFIGS = [
         "title": "Own-target KL: mean weekly KL(sample || target)",
     },
     {
-        "key": "B_cumulative_infections",
-        "value_col": "mean_B_cumulative_infections",
-        "csv_name": "lasso_all_scenarios_B_cumulative_infections.csv",
-        "png_name": "lasso_all_scenarios_B_cumulative_infections.png",
+        "key": "cumulative_infections",
+        "value_col": "mean_cumulative_infections",
+        "csv_name": "lasso_all_scenarios_cumulative_infections.csv",
+        "png_name": "lasso_all_scenarios_cumulative_infections.png",
         "ylabel": "Mean KL vs cumulative infections\nKL(cum sample || cum infections); lower is better",
-        "title": "Panel B: cumulative infections, KL(cumulative sample || cumulative infections)",
+        "title": "Cumulative infections: KL(cumulative sample || cumulative infections)",
     },
     {
-        "key": "C_stride_window_infections",
-        "value_col": "mean_C_stride_window_infections",
-        "csv_name": "lasso_all_scenarios_C_stride_window_infections.csv",
-        "png_name": "lasso_all_scenarios_C_stride_window_infections.png",
+        "key": "stride_window_infections",
+        "value_col": "mean_stride_window_infections",
+        "csv_name": "lasso_all_scenarios_stride_window_infections.csv",
+        "png_name": "lasso_all_scenarios_stride_window_infections.png",
         "ylabel": "Mean KL vs stride-window infections\nKL(windowed sample || windowed infections); lower is better",
-        "title": "Panel C: stride-window infections, KL(stride window sample || stride window infections)",
+        "title": "Stride-window infections: KL(stride window sample || stride window infections)",
     },
     {
-        "key": "E_stride_variant_prevalence_error",
-        "value_col": "mean_E_stride_variant_prevalence_error",
-        "csv_name": "lasso_all_scenarios_E_stride_variant_prevalence_error.csv",
-        "png_name": "lasso_all_scenarios_E_stride_variant_prevalence_error.png",
+        "key": "stride_variant_prevalence_error",
+        "value_col": "mean_stride_variant_prevalence_error",
+        "csv_name": "lasso_all_scenarios_stride_variant_prevalence_error.csv",
+        "png_name": "lasso_all_scenarios_stride_variant_prevalence_error.png",
         "ylabel": "Mean variant prevalence error\nsum_v |p_hat(v) - p_true(v)|; lower is better",
-        "title": "Panel E: variant prevalence error, sum_v |p_hat(v) - p_true(v)|",
+        "title": "Variant prevalence error: sum_v |p_hat(v) - p_true(v)|",
     },
     {
-        "key": "F_stride_component_coverage",
-        "value_col": "mean_F_stride_component_coverage",
-        "csv_name": "lasso_all_scenarios_F_stride_component_coverage.csv",
-        "png_name": "lasso_all_scenarios_F_stride_component_coverage.png",
+        "key": "stride_component_coverage",
+        "value_col": "mean_stride_component_coverage",
+        "csv_name": "lasso_all_scenarios_stride_component_coverage.csv",
+        "png_name": "lasso_all_scenarios_stride_component_coverage.png",
         "ylabel": "Mean component coverage\nunique sampled components / unique true components; higher is better",
-        "title": "Panel F: component coverage, sampled distinct components / true distinct components",
+        "title": "Component coverage: sampled distinct components / true distinct components",
     },
     {
-        "key": "K_coverage_size_100",
-        "value_col": "mean_K_coverage_size_100",
-        "csv_name": "lasso_all_scenarios_K_coverage_size_100.csv",
-        "png_name": "lasso_all_scenarios_K_coverage_size_100.png",
+        "key": "coverage_size_100",
+        "value_col": "mean_coverage_size_100",
+        "csv_name": "lasso_all_scenarios_coverage_size_100.csv",
+        "png_name": "lasso_all_scenarios_coverage_size_100.png",
         "ylabel": "Mean tree coverage score (>100)\n(1/|Pt|) sum_u 1/(d(u,S)+1); higher is better",
-        "title": "Panel K: cumulative tree coverage for size > 100, (1/|Pt|) sum_u 1/(d(u,S)+1)",
+        "title": "Tree coverage, components > 100: (1/|Pt|) sum_u 1/(d(u,S)+1)",
     },
     {
-        "key": "M_8_week_rolling_tree_coverage",
-        "value_col": "mean_M_8_week_rolling_tree_coverage",
-        "csv_name": "lasso_all_scenarios_M_8_week_rolling_tree_coverage.csv",
-        "png_name": "lasso_all_scenarios_M_8_week_rolling_tree_coverage.png",
+        "key": "8_week_rolling_tree_coverage",
+        "value_col": "mean_8_week_rolling_tree_coverage",
+        "csv_name": "lasso_all_scenarios_8_week_rolling_tree_coverage.csv",
+        "png_name": "lasso_all_scenarios_8_week_rolling_tree_coverage.png",
         "ylabel": "Mean 8-week rolling tree coverage\n(1/|Pt|) sum_u 1/(d(u,S)+1); higher is better",
-        "title": "Panel M: 8-week rolling tree coverage, (1/|Pt|) sum_u 1/(d(u,S)+1)",
+        "title": "8-week rolling tree coverage: (1/|Pt|) sum_u 1/(d(u,S)+1)",
     },
 ]
 
@@ -159,8 +175,8 @@ def resolve_lasso_key(name: str | None) -> str:
 def parse_args():
     ap = argparse.ArgumentParser(
         description=(
-            "Sweep LASSO subgroup count and evaluate own-target plus panels "
-            "B, C, E, F, K, and M for all 6 scenarios."
+            "Sweep LASSO subgroup count and evaluate own-target KL plus the "
+            "ground-truth metrics for all 6 scenarios."
         )
     )
 
@@ -169,7 +185,11 @@ def parse_args():
     ap.add_argument("--population", required=True,
                     help="Path to population file")
     ap.add_argument("--infections", default=None,
-                    help="Path to infections file. Needed for panels B, C, and E.")
+                    help="Path to the ABM infections file. Needed only for the "
+                         "ground-truth metrics (cumulative_infections, "
+                         "stride_window_infections, "
+                         "stride_variant_prevalence_error); the sweep itself "
+                         "runs on the line list alone.")
 
     ap.add_argument("--date-field", default=DATE_FIELD_DEFAULT,
                     help=f"Linelist date column (default: {DATE_FIELD_DEFAULT})")
@@ -609,7 +629,11 @@ def main():
 
     weekly_inf_hist = None
     weekly_variant_counts_true = None
-    if args.infections:
+    if args.infections and not _HAVE_TRUTH:
+        print("[WARN] --infections given but PhyloGAS is not installed; the "
+              "ground-truth metrics will be skipped.\n"
+              "       pip install -e /path/to/PhyloGAS")
+    if args.infections and _HAVE_TRUTH:
         weekly_inf_hist = build_weekly_infections(
             args.infections,
             pop_df,
@@ -626,18 +650,20 @@ def main():
                 variant_col="variant_label",
             )
         except Exception as exc:
-            print(f"[WARN] Skipping panel E variant prevalence metric: {exc}")
+            print(f"[WARN] Skipping stride_variant_prevalence_error: {exc}")
     else:
-        print("[WARN] --infections not provided; panels B, C, and E will be skipped.")
+        print("[WARN] cumulative_infections, stride_window_infections and "
+              "stride_variant_prevalence_error will be skipped.")
 
     pid_col = "sim_pid" if "sim_pid" in line_df.columns else ("pid" if "pid" in line_df.columns else None)
     adj_graph = None
     pid_sizes = None
-    if "contact_pid" in line_df.columns and pid_col is not None:
+    if "contact_pid" in line_df.columns and pid_col is not None and _HAVE_TRUTH:
         adj_graph = build_undirected_adj(line_df, pid_col=pid_col, contact_col="contact_pid")
         pid_sizes = precompute_component_sizes(adj_graph, set(line_df[pid_col].astype(str)))
     else:
-        print("[WARN] Missing contact graph columns; panels K and M will be skipped.")
+        print("[WARN] No contact graph (or no PhyloGAS); coverage_size_100 and "
+              "8_week_rolling_tree_coverage will be skipped.")
 
     scenarios = sorted(
         [scfg for scfg in SCENARIOS if scfg.get("id") in {1, 2, 3, 4, 5, 6}],
@@ -703,12 +729,12 @@ def main():
             )
             metric_values = {
                 "own_target": mean_kl,
-                "B_cumulative_infections": np.nan,
-                "C_stride_window_infections": np.nan,
-                "E_stride_variant_prevalence_error": np.nan,
-                "F_stride_component_coverage": np.nan,
-                "K_coverage_size_100": np.nan,
-                "M_8_week_rolling_tree_coverage": np.nan,
+                "cumulative_infections": np.nan,
+                "stride_window_infections": np.nan,
+                "stride_variant_prevalence_error": np.nan,
+                "stride_component_coverage": np.nan,
+                "coverage_size_100": np.nan,
+                "8_week_rolling_tree_coverage": np.nan,
             }
 
             if weekly_inf_hist is not None:
@@ -719,8 +745,8 @@ def main():
                     scfg,
                     window_weeks=sampling_stride_weeks(scfg),
                 )
-                metric_values["B_cumulative_infections"] = mean_finite(ys_b)
-                metric_values["C_stride_window_infections"] = mean_finite(ys_c)
+                metric_values["cumulative_infections"] = mean_finite(ys_b)
+                metric_values["stride_window_infections"] = mean_finite(ys_c)
 
             if weekly_variant_counts_true is not None:
                 _, ys_e = variant_prevalence_error_series(
@@ -738,8 +764,8 @@ def main():
                     start_date,
                     len(weekly_ll_hist),
                 )
-                metric_values["E_stride_variant_prevalence_error"] = mean_finite(ys_e)
-                metric_values["F_stride_component_coverage"] = mean_finite(ys_f)
+                metric_values["stride_variant_prevalence_error"] = mean_finite(ys_e)
+                metric_values["stride_component_coverage"] = mean_finite(ys_f)
 
             if adj_graph is not None and pid_sizes is not None:
                 _, ys_k = cumulative_tree_coverage_series(
@@ -763,8 +789,8 @@ def main():
                     adj_graph,
                     roll_win=8,
                 )
-                metric_values["K_coverage_size_100"] = mean_finite(ys_k)
-                metric_values["M_8_week_rolling_tree_coverage"] = mean_finite(ys_m)
+                metric_values["coverage_size_100"] = mean_finite(ys_k)
+                metric_values["8_week_rolling_tree_coverage"] = mean_finite(ys_m)
 
             for cfg in METRIC_CONFIGS:
                 value = metric_values[cfg["key"]]
@@ -779,12 +805,12 @@ def main():
             print(
                 f"  Scenario {scen_id}: "
                 f"own_target={metric_values['own_target']:.6f}, "
-                f"B={metric_values['B_cumulative_infections']:.6f}, "
-                f"C={metric_values['C_stride_window_infections']:.6f}, "
-                f"E={metric_values['E_stride_variant_prevalence_error']:.6f}, "
-                f"F={metric_values['F_stride_component_coverage']:.6f}, "
-                f"K={metric_values['K_coverage_size_100']:.6f}, "
-                f"M={metric_values['M_8_week_rolling_tree_coverage']:.6f}"
+                f"cum_inf={metric_values['cumulative_infections']:.6f}, "
+                f"stride_inf={metric_values['stride_window_infections']:.6f}, "
+                f"var_err={metric_values['stride_variant_prevalence_error']:.6f}, "
+                f"comp_cov={metric_values['stride_component_coverage']:.6f}, "
+                f"cov100={metric_values['coverage_size_100']:.6f}, "
+                f"roll8={metric_values['8_week_rolling_tree_coverage']:.6f}"
             )
 
         for cfg in METRIC_CONFIGS:

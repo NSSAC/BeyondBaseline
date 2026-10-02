@@ -4,6 +4,11 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+try:
+    from .eval_names import canonicalize, higher_is_better
+except ImportError:
+    from eval_names import canonicalize, higher_is_better
+
 def get_stride_group(label):
     """Helper to categorize scenarios into 1-week or 4-week strides"""
     label_str = str(label)
@@ -37,6 +42,7 @@ def main():
         df_list = []
         for f in auc_files:
             df = pd.read_csv(f)
+            df["eval_type"] = df["eval_type"].map(canonicalize)
             df["replicate"] = f.parent.name
             df_list.append(df)
             
@@ -55,10 +61,10 @@ def main():
         # --- Z-SCORE & RANK CALCULATION ---
         def process_auc_metrics(group):
             eval_type = group['eval_type'].iloc[0]
-            
-            # Identify if this metric is "higher is better" (Coverage metrics)
-            higher_is_better_prefixes = ('F_', 'I_', 'J_', 'K_', 'L_', 'M_', 'N_')
-            asc = not eval_type.startswith(higher_is_better_prefixes) # True if Lower is Better (KL, Error)
+
+            # Direction of improvement comes from the eval_names registry,
+            # not from a letter prefix.
+            asc = not higher_is_better(eval_type)  # True if Lower is Better (KL, Error)
             
             # Rank within this specific stride group
             group['rank_of_median_auc'] = group['median_auc'].rank(method="dense", ascending=asc)

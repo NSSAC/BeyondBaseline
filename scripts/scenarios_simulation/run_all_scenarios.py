@@ -734,7 +734,7 @@ def main():
     scenario_series   = {algo: {} for algo in ALG.keys()}
     total_algo_time   = {algo: 0.0 for algo in ALG.keys()}
     count_algo_runs   = {algo: 0   for algo in ALG.keys()}
-    kl_rows = []  # accumulate per-week KL points across all panels (A/B/C)
+    kl_rows = []  # accumulate per-week KL points across all KL metrics
     all_weekly_hist = {} # This will be populated to replace the replay loop
     all_weekly_samples = {}  # scenario_id -> {algo -> [DataFrame per week]}
 
@@ -795,14 +795,14 @@ def main():
             eval_weeks = evaluation_week_numbers(scfg, len(ys))
             for week_num, v in zip(eval_weeks, ys):
                 rows.append({"scenario": scfg["id"], "label": label, "week": week_num, "kl": float(v)})
-                # Panel A ("targets"): save KL per week
+                # kl_targets: KL against that scenario's own target, per week
                 kl_rows.append({
                     "run_id": run_id,
                     "linelist_id": linelist_id,
                     "algorithm": algo,
                     "scenario_id": scfg["id"],
                     "scenario_label": label,
-                    "eval_type": "A_targets",
+                    "eval_type": "kl_targets",
                     "roll_window": None,
                     "week": week_num,
                     "kl": float(v),
@@ -993,7 +993,7 @@ def main():
                 label = SCEN_LABELS[scn]
                 ax.plot(x, y, marker=marker_map.get(scn, "o"), linestyle="-", label=label)
                 auc_rows.append({
-                    "eval_type": "A_targets",
+                    "eval_type": "kl_targets",
                     "algorithm": algo,
                     "scenario_id": scn,
                     "scenario_label": label,
@@ -1002,7 +1002,7 @@ def main():
                     })
             ax.grid(True, linestyle="--", alpha=0.6); ax.legend(ncol=4, fontsize=8); ax.set_xlim(left=0.9)
         figA.tight_layout()
-        outA = out_path("A_table3_targets_1xN.png")
+        outA = out_path("kl_targets_table_1xN.png")
         plt.savefig(outA, dpi=150); print(f"Saved: {outA}")
         plt.close(figA)
 
@@ -1024,7 +1024,7 @@ def main():
 
         # =================== FIGURE N: Longitudinal Equity Heatmap (By Age Group) ===================
         if "alias_contact" in line_df.columns and "age_group" in line_df.columns:
-            print("Computing Longitudinal Equity Heatmaps by Age Group (Figure N)...")
+            print("Computing Longitudinal Equity Heatmaps by Age Group...")
 
             # 1. Get unique, valid age groups from the linelist
             age_groups = sorted([ag for ag in line_df["age_group"].dropna().unique() if str(ag) != "nan"])
@@ -1076,12 +1076,12 @@ def main():
                         age_cov[ag][algo][sid] = series_map[ag]
                         
                         ag_clean_csv = ag.replace(' ', '_').replace('/', '_').replace('(', '').replace(')', '')
-                        eval_type = f"N_equity_{ag_clean_csv}"
+                        eval_type = f"equity_{ag_clean_csv}"
                         
                         xs, ys = series_map[ag]
                         _record_series(eval_type, algo, sid, xs, ys)
 
-            # --- Plot Figure N (5 Separate Heatmaps) ---
+            # --- Plot the equity heatmaps (one per age group) ---
             for ag in age_groups:
                 matrix = []
                 valid_row_labels = []
@@ -1132,12 +1132,12 @@ def main():
                 
                 # Sanitize the age group name for saving to the filesystem
                 ag_clean_file = "".join([c if c.isalnum() else "_" for c in ag]).strip("_")
-                outN = out_path(f"N_equity_heatmap_{ag_clean_file}.png")
+                outN = out_path(f"equity_heatmap_{ag_clean_file}.png")
                 plt.savefig(outN, dpi=150)
                 print(f"Saved: {outN}")
                 plt.close(figN)
         else:
-            print("Missing 'contact_pid' or 'age_group' column; skipping Figure N.")
+            print("Missing 'contact_pid' or 'age_group' column; skipping the equity heatmaps.")
 
     else:
         print("\n--no-plots flag detected. Skipping plot generation.")

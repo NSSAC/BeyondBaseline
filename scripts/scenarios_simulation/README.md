@@ -119,3 +119,36 @@ scenarios-weekly \
   --algorithms surs \
   --no-replacement
 ```
+## Evaluation metric names
+
+Metrics used to be labelled by a single letter -- "panel A", "panel F" -- which
+went into the `eval_type` column and into output filenames. The letters are
+retired; see `eval_names.py` for the registry and
+`PhyloGAS/command_map.md` for the old-to-new table.
+
+`eval_names.py` declares, per metric, whether a higher value is better, its
+metric family, and whether it needs ABM ground truth. Use it rather than
+re-deriving any of those:
+
+```python
+from eval_names import higher_is_better, metric_family, canonicalize
+
+asc = not higher_is_better(eval_type)        # ranking direction
+label = metric_family(eval_type)             # axis grouping
+name = canonicalize("F_stride_component_coverage")   # -> stride_component_coverage
+```
+
+`canonicalize()` accepts the old letter-coded names, so result CSVs from
+earlier runs still load.
+
+### What needs ground truth
+
+This repository computes only what a health department could compute from a
+real line list: `kl_targets` (KL against the scenario's own target) and
+`equity_<stratifier>`. Everything else -- true infection counts, variant
+prevalence error, transmission-component and tree coverage -- needs the ABM's
+hidden truth and lives in `phylogas.benchmark.truth_metrics`.
+
+The sweeps therefore import those metrics optionally. `--infections` is read
+only by them, so a sweep over an available line list runs with no PhyloGAS
+installed; it prints which metrics it skipped.
