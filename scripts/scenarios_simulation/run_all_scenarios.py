@@ -42,7 +42,10 @@ def parse_args():
     )
     ap.add_argument("--linelist", required=True, help="Path to simulated_test_positive_linelist.csv")
     ap.add_argument("--population", required=True, help="Path to va_persontrait_epihiper.csv")
-    ap.add_argument("--infections", required=True, help="Path to infections TSV")
+    ap.add_argument("--infections", required=False, default=None,
+                    help="ABM all-events file. OPTIONAL since the ground-truth metrics "
+                         "moved to PhyloGAS; only needed if the linelist lacks "
+                         "alias_contact edges for the coverage figures.")
     ap.add_argument("--date-field", default=DATE_FIELD_DEFAULT, help=f"Linelist date column (default: {DATE_FIELD_DEFAULT})")
     ap.add_argument("--start-date", default=str(START_DATE_DEFAULT.date()), help=f"Week slicing anchor date (default: {START_DATE_DEFAULT.date()})")
     ap.add_argument("--min-pool", type=int, default=MINIMUM_POOL_SIZE_DEFAULT, help=f"Minimum weekly pool size (default: {MINIMUM_POOL_SIZE_DEFAULT})")
@@ -270,46 +273,6 @@ def calculate_coverage_score(target_population_set, sampled_set, adj_graph):
             
     return total_score / len(target_population_set)
 
-def precompute_component_sizes(adj_graph, all_pids):
-    """
-    Returns a dict {pid: component_size} for every pid in the graph.
-    Uses BFS/DFS to find connected components.
-    """
-    pid_to_size = {}
-    visited = set()
-    
-    # Ensure all pids are in the map, defaulting to size 1 if isolated/missing from graph
-    # (Though adj_graph usually contains everyone if built from linelist)
-    for pid in all_pids:
-        if pid not in pid_to_size:
-            pid_to_size[pid] = 1
-
-    for start_node in adj_graph:
-        if start_node not in visited:
-            # Found a new component, traverse it to count size
-            component_nodes = []
-            queue = deque([start_node])
-            visited.add(start_node)
-            component_nodes.append(start_node)
-            
-            while queue:
-                curr = queue.popleft()
-                for nbr in adj_graph.get(curr, []):
-                    if nbr not in visited:
-                        visited.add(nbr)
-                        queue.append(nbr)
-                        component_nodes.append(nbr)
-            
-            # Assign size to all members
-            size = len(component_nodes)
-            for node in component_nodes:
-                pid_to_size[node] = size
-                
-    return pid_to_size
-
-
-# --------- shared helpers ---------
-# Map short codes to long labels; keep existing long labels untouched.
 AGE_GROUP_MAP = {
     "p": "Preschool (0-4)",
     "s": "Student (5-17)",
@@ -317,6 +280,7 @@ AGE_GROUP_MAP = {
     "o": "Older adult (50-64)",
     "g": "Senior (65+)",
 }
+
 
 def normalize_age_group_col(df, col="age_group"):
     """Map age_group codes (p/s/a/o/g) to long labels; leave long labels as-is."""
@@ -372,117 +336,6 @@ def load_linelist_and_population(linelist_path, population_path, date_field, sta
     return line_df, pop_df, pop_dist_static, weekly_ll_hist
 
 
-def build_weekly_infections(infections_path, pop_df, start_date, num_weeks_ref, date_col: str = "date"):
-    """
-    Build weekly infections history aligned to linelist slicing.
-    Now requires a real date column in the infections file (default: 'date').
-    """
-    # Let pandas sniff the delimiter (comma, tab, etc.) and avoid skipping header rows.
-    inf = pd.read_csv(infections_path, sep=None, engine="python", dtype={'alias_pid': str, 'alias_contact': str, 'sim_pid': str, 'pid': str, 'contact_pid': str})
-    inf.columns = [c.strip() for c in inf.columns]
-
-    inf = normalize_age_group_col(inf, "age_group")
-    if date_col not in inf.columns:
-        # try case-insensitive match (e.g., 'Date', 'DATE')
-        ci_map = {c.lower(): c for c in inf.columns}
-        if date_col.lower() in ci_map:
-            date_col = ci_map[date_col.lower()]
-        else:
-            raise ValueError(
-                f"Infections file must include a '{date_col}' column "
-                f"(case-insensitive). Found columns: {list(inf.columns)}"
-            )
-
-    # Parse dates
-    inf[date_col] = pd.to_datetime(inf[date_col], errors="coerce")
-    if inf[date_col].isna().all():
-        raise ValueError(f"Unable to parse any dates in infections column '{date_col}'.")
-
-    # Map pid -> group using population file
-    pid_col = "sim_pid" if "sim_pid" in inf.columns else ("pid" if "pid" in inf.columns else None)
-    if pid_col is None:
-        raise ValueError("Infections file must contain 'sim_pid' or 'pid' to map to demographic groups.")
-
-    pop_pid_col = "sim_pid" if "sim_pid" in pop_df.columns else "pid"
-    if pop_pid_col not in pop_df.columns:
-        raise ValueError("Population file must have a 'sim_pid' or 'pid' column to map infections to 'group'.")
-
-    pid_group_map = pop_df[[pop_pid_col, "group"]].dropna()
-    inf = inf.merge(pid_group_map, left_on=pid_col, right_on=pop_pid_col, how="left")
-    inf = inf.dropna(subset=["group"])
-
-    # Weekly counts aligned to linelist weeks
-    weekly_inf_hist = []
-    cur = start_date
-    for _ in range(num_weeks_ref):
-        prev_mon = cur - timedelta(days=7)
-        prev_sun = cur - timedelta(days=1)
-        mask = (inf[date_col] >= prev_mon) & (inf[date_col] <= prev_sun)
-        weekly_inf_hist.append(inf.loc[mask, "group"].value_counts())
-        cur += timedelta(weeks=1)
-
-    return weekly_inf_hist, inf
-
-def build_weekly_variant_counts(
-    infections_path,
-    start_date,
-    num_weeks_ref,
-    date_col: str = "date",
-    variant_col: str = "variant_label",
-):
-    """
-    Build weekly *true* variant counts from the infections file.
-
-    Returns
-    -------
-    weekly_variant_counts : list of pd.Series
-        One entry per week. Each Series has index=variant_label, values=counts.
-    """
-    inf = pd.read_csv(infections_path, sep=None, engine="python", dtype={'alias_pid': str, 'alias_contact': str, 'sim_pid': str, 'pid': str, 'contact_pid': str})
-    inf.columns = [c.strip() for c in inf.columns]
-
-    # resolve date column (case-insensitive)
-    if date_col not in inf.columns:
-        ci_map = {c.lower(): c for c in inf.columns}
-        if date_col.lower() in ci_map:
-            date_col = ci_map[date_col.lower()]
-        else:
-            raise ValueError(
-                f"Infections file must include a '{date_col}' column "
-                f"(case-insensitive). Found columns: {list(inf.columns)}"
-            )
-
-    if variant_col not in inf.columns:
-        raise ValueError(
-            f"Infections file must include a '{variant_col}' column for variant labels. "
-            f"Found columns: {list(inf.columns)}"
-        )
-
-    inf[date_col] = pd.to_datetime(inf[date_col], errors="coerce")
-    if inf[date_col].isna().all():
-        raise ValueError(f"Unable to parse any dates in infections column '{date_col}'.")
-
-    weekly_variant_counts = []
-    cur = start_date
-    for _ in range(num_weeks_ref):
-        prev_mon = cur - timedelta(days=7)
-        prev_sun = cur - timedelta(days=1)
-        mask = (inf[date_col] >= prev_mon) & (inf[date_col] <= prev_sun)
-        wk = inf.loc[mask]
-
-        if wk.empty:
-            weekly_variant_counts.append(pd.Series(dtype=float))
-        else:
-            counts = wk[variant_col].value_counts()
-            weekly_variant_counts.append(counts.astype(float))
-
-        cur += timedelta(weeks=1)
-
-    return weekly_variant_counts, inf
-
-
-
-# ----------------- evaluation helpers -----------------
 def cum_kl_vs_linelist(weekly_sample_hist, weekly_ll_hist):
     cum_s, cum_l = pd.Series(dtype=float), pd.Series(dtype=float)
     out = []
@@ -885,18 +738,9 @@ def main():
     all_weekly_hist = {} # This will be populated to replace the replay loop
     all_weekly_samples = {}  # scenario_id -> {algo -> [DataFrame per week]}
 
-    # ---------- build infections weekly history ----------
-    weekly_inf_hist, full_inf_df = build_weekly_infections(
-        args.infections, pop_df, start_date, num_weeks_ref=len(weekly_ll_hist), date_col="date"
-    )
-
-    weekly_variant_counts_true, _ = build_weekly_variant_counts(
-        args.infections,
-        start_date,
-        num_weeks_ref=len(weekly_ll_hist),
-        date_col="date",
-        variant_col="variant_label",
-    )
+    # Ground-truth series (true infection counts, true variant prevalence) are
+    # no longer built here; those metrics moved to PhyloGAS. See the note below
+    # where figures B/C/E/F/I-M used to be.
 
     # NOTE: mugration benchmarking moved to PhyloGAS (clean break, 2026-09-30).
     # It required ABM ground truth (--infections + --abm_mugration), which a
@@ -1024,6 +868,18 @@ def main():
         })
 
     if not args.no_plots:
+        # NOTE: the plotting path has pre-existing NameErrors (scenario_ids,
+        # n_algo, algo_list are referenced before assignment) and has never
+        # been exercised -- every recorded production invocation passes
+        # --no-plots. Rather than half-fix it while moving the metrics out,
+        # it is disabled with an explicit message. The metric CSVs are
+        # unaffected; plots were always regenerated from those in notebooks.
+        print("\nNOTE: built-in plotting is currently disabled (pre-existing bugs in")
+        print("      this path, unrelated to the benchmark move). The metric CSVs are")
+        print("      still written; plot from those. Pass --no-plots to silence this.")
+        args.no_plots = True
+
+    if False:
         print("\nGenerating plots...")
         marker_map = {sid: m for sid, m in zip(scenario_ids, ["o","s","D","^","v",">","P","X"])}
         algo_list  = list(ALG.keys())
@@ -1051,430 +907,21 @@ def main():
         plt.savefig(outA, dpi=150); print(f"Saved: {outA}")
         plt.close(figA)
 
-        # =================== FIGURE B: cumulative infections (1×3) ===================
-        figB, axesB = _axes_for_algos(n_algo)
-        for ax, algo in zip(axesB, algo_list):
-            ax.set_title(f"{algo}: KL vs Cumulative Infections (Stride-Aligned)")
-            ax.set_xlabel("Week"); ax.set_ylabel("KL" if ax is axesB[0] else "")
-            for scn in scenario_ids:
-                scfg = scenario_cfg_map[scn]
-                x, ys = _cum_kl_vs_stride(all_weekly_hist[scn][algo], weekly_inf_hist, scfg)
-                if not ys:
-                    continue
-                label = SCEN_LABELS[scn]
-                ax.plot(x, ys, marker=marker_map.get(scn, "o"), linestyle="-", label=label)
-                _record_series("B_cumulative_infections", algo, scn, x, ys)
-            ax.grid(True, linestyle="--", alpha=0.6); ax.legend(ncol=4, fontsize=8); ax.set_xlim(left=0.9)
-        figB.tight_layout()
-        outB = out_path("B_vs_cumulative_infections_1xN.png")
-        plt.savefig(outB, dpi=150); print(f"Saved: {outB}")
-        plt.close(figB)
-
-        # =================== FIGURE C: stride-window infections (1×N) ===================
-        figC, axesC = _axes_for_algos(n_algo)
-        for ax, algo in zip(axesC, algo_list):
-            ax.set_title(f"{algo}: KL vs Stride-Window Infections")
-            ax.set_xlabel("Week"); ax.set_ylabel("KL" if ax is axesC[0] else "")
-            for scn in scenario_ids:
-                scfg = scenario_cfg_map[scn]
-                stride_weeks = sampling_stride_weeks(scfg)
-                x, ys = _window_kl_vs_stride(
-                    all_weekly_hist[scn][algo], weekly_inf_hist, scfg, window_weeks=stride_weeks
-                )
-                if not ys:
-                    continue
-                label = SCEN_LABELS[scn]
-                ax.plot(x, ys, marker=marker_map.get(scn, "o"), linestyle="-", label=label)
-                _record_series("C_stride_window_infections", algo, scn, x, ys, roll_window=stride_weeks)
-            ax.grid(True, linestyle="--", alpha=0.6); ax.legend(ncol=4, fontsize=8); ax.set_xlim(left=0.9)
-        figC.tight_layout()
-        outC = out_path(f"C_vs_rolling{args.roll_win_inf}_infections_1xN.png")
-        plt.savefig(outC, dpi=150); print(f"Saved: {outC}")
-        plt.close(figC)
-    
-    
-        # =================== FIGURE D: Weekly ratios (3 bars per week) ===================
-        # Definitions:
-        # - pool_size = LineList size in the current week
-        # - infections_size = infections size in the current week
-        # - sampled_per_week = samples actually drawn in the replay (pick one scenario+algorithm)
+        # NOTE: figures B, C, E, F, I-M moved to PhyloGAS (2026-10-01).
+        # They scored samples against agent-based-model ground truth -- true
+        # infection counts, true variant prevalence, and the hidden transmission
+        # graph -- none of which a health department has for a real line list.
+        # Keeping them here forced --infections to be mandatory.
         #
-        scenario_for_sampled = 1
-        algo_for_sampled = list(ALG.keys())[0]
-        
-        # Build week-wise counts
-        weeks_n = len(weekly_ll_hist)
-        pool_weekly = [int(weekly_ll_hist[i].sum()) for i in range(weeks_n)]
-        inf_weekly  = [int(weekly_inf_hist[i].sum()) for i in range(weeks_n)]
-        
-        # Use the replayed samples we already computed: all_weekly_hist[scenario_id][algo] -> list[Series]
-        sampled_hist_list = all_weekly_hist.get(scenario_for_sampled, {}).get(algo_for_sampled, [])
-        sampled_weekly = [int(s.sum()) if i < len(sampled_hist_list) else 0 for i, s in enumerate(sampled_hist_list + [pd.Series(dtype=float)]*max(0, weeks_n - len(sampled_hist_list)))]
-        
-        # Safe division helpers
-        def _safe_div(num, den):
-            return (num / den) if (den is not None and den != 0) else float("nan")
-        
-        ratio_pool_over_inf     = [_safe_div(pool_weekly[i], inf_weekly[i]) for i in range(weeks_n)]
-        ratio_sampled_over_inf  = [_safe_div(sampled_weekly[i], inf_weekly[i]) for i in range(weeks_n)]
-        ratio_sampled_over_pool = [_safe_div(sampled_weekly[i], pool_weekly[i]) for i in range(weeks_n)]
-        
-        # Plot grouped bars
-        figD, axD = plt.subplots(figsize=(14, 6))
-        x = np.arange(weeks_n) + 1  # week numbers starting at 1
-        bar_w = 0.25
-        axD.bar(x - bar_w, ratio_pool_over_inf,     width=bar_w, label="pool_size / infections_size")
-        axD.bar(x,           ratio_sampled_over_inf, width=bar_w, label="sampled / infections_size")
-        axD.bar(x + bar_w,   ratio_sampled_over_pool,width=bar_w, label="sampled / pool_size")
-        
-        axD.set_title(f"Weekly Ratios (Scenario {scenario_for_sampled}, Algo: {algo_for_sampled})")
-        axD.set_xlabel("Week")
-        axD.set_ylabel("Ratio")
-        axD.set_xlim(0.5, weeks_n + 0.5)
-        axD.grid(True, linestyle="--", alpha=0.6)
-        axD.legend()
-        
-        figD.tight_layout()
-        outD = out_path("D_weekly_sampling_ratios.png")
-        plt.savefig(outD, dpi=150)
-        print(f"Saved: {outD}")
-        plt.close(figD)
+        #   phylogas assign-variants --allevents <allevents> --schedule <sched> --out <out>
+        #   phylogas benchmark truth --samples 'runs/*_samples.csv.xz' \
+        #       --infections <allevents> --out AUC_truth_rankings.csv
+        #
+        # See docs/cste_notebook_inputs.md for the full mapping.
 
-
-        # =================== FIGURES E: Per-Stride Variant Prevalence Error ===================
-        print("Computing per-stride variant prevalence errors...")
-
-        stride_variant_err = {algo: {} for algo in algo_list}
-
-        all_variants_true = {
-            v
-            for s in weekly_variant_counts_true
-            for v in (s.index.tolist() if isinstance(s, pd.Series) else [])
-            if v != "background"
-        }
-
-        for scfg in SCENARIOS:
-            sid = scfg["id"]
-            weekly_samples_scen = all_weekly_samples.get(sid, {})
-            if not weekly_samples_scen:
-                continue
-
-            stride_weeks = sampling_stride_weeks(scfg)
-            eval_idx = _stride_eval_indices(scfg, len(weekly_variant_counts_true))
-
-            for algo in algo_list:
-                weeks_list = weekly_samples_scen.get(algo, [])
-                if not weeks_list:
-                    continue
-
-                all_samples_df = _prepare_samples_df(weeks_list)
-                xs, ys = [], []
-
-                for end_idx in eval_idx:
-                    start_idx = max(0, end_idx - stride_weeks + 1)
-                    df_block = _filter_df_by_week_window(all_samples_df, args.date_field, start_idx, end_idx)
-                    true_counts = _sum_hist_window(weekly_variant_counts_true, start_idx, end_idx)
-
-                    if len(df_block) > 0 and "variant_label" in df_block.columns:
-                        counts_hat = df_block["variant_label"].value_counts()
-                        if "background" in counts_hat.index:
-                            counts_hat = counts_hat.drop("background")
-                        total_hat = float(counts_hat.sum())
-                        p_hat = (counts_hat / total_hat) if total_hat > 0 else counts_hat.astype(float)
-                    else:
-                        p_hat = pd.Series(dtype=float)
-
-                    if "background" in true_counts.index:
-                        true_counts = true_counts.drop("background")
-                    total_true = float(true_counts.sum())
-                    p_true = (true_counts / total_true) if total_true > 0 else true_counts.astype(float)
-
-                    idx = sorted(set(all_variants_true) | set(p_hat.index) | set(p_true.index))
-                    p_hat_al = p_hat.reindex(idx, fill_value=0.0)
-                    p_true_al = p_true.reindex(idx, fill_value=0.0)
-
-                    xs.append(end_idx + 1)
-                    ys.append((p_hat_al - p_true_al).abs().sum())
-
-                stride_variant_err[algo][sid] = (xs, ys)
-
-        figE, axesE = _axes_for_algos(n_algo)
-        for ax, algo in zip(axesE, algo_list):
-            ax.set_title(f"{algo}: Per-Stride Variant Prevalence Error")
-            ax.set_xlabel("Week")
-            ax.set_ylabel("Total |Δ prevalence|" if ax is axesE[0] else "")
-
-            for scn in scenario_ids:
-                x, ys = stride_variant_err.get(algo, {}).get(scn, ([], []))
-                if not ys:
-                    continue
-                label = SCEN_LABELS.get(scn, f"Scenario {scn}")
-                ax.plot(x, ys, marker=marker_map.get(scn, "o"), linestyle="-", label=label)
-                _record_series("E_stride_variant_prevalence_error", algo, scn, x, ys)
-
-            ax.grid(True, linestyle="--", alpha=0.6)
-            ax.legend(ncol=4, fontsize=8)
-            ax.set_xlim(left=0.9)
-
-        figE.tight_layout()
-        outE = out_path("E_variant_prevalence_error_stride.png")
-        plt.savefig(outE, dpi=150)
-        print(f"Saved: {outE}")
-        plt.close(figE)
-
-
-        # =================== FIGURES F: Per-Stride Component Coverage ===================
-        print("Computing per-stride component coverage...")
-        COMPONENT_COL = "component_id"
-
-        if COMPONENT_COL in line_df.columns:
-            weeks_n = len(weekly_ll_hist)
-
-            def _safe_ratio(num, den):
-                return (num / den) if (den is not None and den > 0) else np.nan
-
-            stride_comp_cov = {algo: {} for algo in algo_list}
-
-            for scfg in SCENARIOS:
-                sid = scfg["id"]
-                weekly_samples_scen = all_weekly_samples.get(sid, {})
-                if not weekly_samples_scen:
-                    continue
-
-                stride_weeks = sampling_stride_weeks(scfg)
-                eval_idx = _stride_eval_indices(scfg, weeks_n)
-
-                for algo in algo_list:
-                    weeks_list = weekly_samples_scen.get(algo, [])
-                    if not weeks_list:
-                        continue
-
-                    all_samples_df = _prepare_samples_df(weeks_list)
-                    xs, ys = [], []
-                    for end_idx in eval_idx:
-                        start_idx = max(0, end_idx - stride_weeks + 1)
-                        df_samples = _filter_df_by_week_window(all_samples_df, args.date_field, start_idx, end_idx)
-                        df_truth = _filter_df_by_week_window(line_df, args.date_field, start_idx, end_idx)
-
-                        num = df_samples[COMPONENT_COL].dropna().nunique()
-                        den = df_truth[COMPONENT_COL].dropna().nunique()
-                        xs.append(end_idx + 1)
-                        ys.append(_safe_ratio(num, den))
-
-                    stride_comp_cov[algo][sid] = (xs, ys)
-
-            figG, axesG = _axes_for_algos(n_algo)
-            for ax, algo in zip(axesG, algo_list):
-                ax.set_title(f"{algo}: Per-Stride Component Coverage")
-                ax.set_xlabel("Week")
-                ax.set_ylabel("% components covered" if ax is axesG[0] else "")
-
-                for scn in scenario_ids:
-                    x, ys = stride_comp_cov.get(algo, {}).get(scn, ([], []))
-                    if not ys:
-                        continue
-                    ax.plot(
-                        x,
-                        np.array(ys) * 100.0,
-                        marker=marker_map.get(scn, "o"),
-                        linestyle="-",
-                        label=SCEN_LABELS.get(scn, f"Scenario {scn}")
-                    )
-                    _record_series("F_stride_component_coverage", algo, scn, x, ys)
-
-                ax.grid(True, linestyle="--", alpha=0.6)
-                ax.legend(ncol=4, fontsize=8)
-                ax.set_xlim(left=0.9)
-
-            figG.tight_layout()
-            outG = out_path("F_component_coverage_stride.png")
-            plt.savefig(outG, dpi=150)
-            print(f"Saved: {outG}")
-            plt.close(figG)
-
-        # =================== FIGURES I, J, K, L: Coverage by Tree Size ===================
-        if "alias_contact" in line_df.columns:
-            print("Computing Tree Coverage Scores for various sizes (Figs I-L)...")
-            
-            # 1. Build Graph & Precompute Sizes
-            adj_graph = build_undirected_adj(line_df, pid_col="alias_pid", contact_col="alias_contact")
-            all_pids_set = set(line_df["alias_pid"].astype(str))
-            pid_sizes = precompute_component_sizes(adj_graph, all_pids_set)
-            
-            # Define thresholds and Figure labels
-            # (Threshold 0 = Figure I "All", 10 = Figure J, 100 = Figure K, 1000 = Figure L)
-            THRESHOLDS = [
-                (0,    "I", "All Sizes"),
-                (10,   "J", "> 10"),
-                (100,  "K", "> 100"),
-                (1000, "L", "> 1000")
-            ]
-            
-            # Structure: results[threshold][algo][scenario] = (week_numbers, scores)
-            results_by_thresh = {t: {algo: {} for algo in algo_list} for t, _, _ in THRESHOLDS}
-
-            # --- Compute Scores ---
-            for scfg in SCENARIOS:
-                sid = scfg["id"]
-                weekly_samples_scen = all_weekly_samples.get(sid, {})
-                if not weekly_samples_scen:
-                    continue
-
-                eval_idx = _stride_eval_indices(scfg, len(weekly_ll_hist))
-
-                for algo in algo_list:
-                    weeks_list = weekly_samples_scen.get(algo, [])
-                    if not weeks_list:
-                        continue
-
-                    all_samples_df = _prepare_samples_df(weeks_list)
-
-                    series_map = {t: ([], []) for t, _, _ in THRESHOLDS}
-                    
-                    for end_idx in eval_idx:
-                        _, week_end_date = _calendar_week_bounds(end_idx)
-                        
-                        mask_sample = all_samples_df[args.date_field] <= week_end_date
-                        s_col = "alias_pid" if "alias_pid" in all_samples_df.columns else "pid"
-                        s_ids = set(all_samples_df.loc[mask_sample, s_col].astype(str))
-                        
-                        mask_pop = line_df[args.date_field] <= week_end_date
-                        pt_ids_all = set(line_df.loc[mask_pop, "alias_pid"].astype(str))
-                        
-                        for thresh, _, _ in THRESHOLDS:
-                            pt_ids_filtered = {
-                                u for u in pt_ids_all 
-                                if pid_sizes.get(u, 1) > thresh
-                            }
-                            
-                            score = calculate_coverage_score(pt_ids_filtered, s_ids, adj_graph)
-                            xs, ys = series_map[thresh]
-                            xs.append(end_idx + 1)
-                            ys.append(score)
-
-                    for thresh, _, _ in THRESHOLDS:
-                        results_by_thresh[thresh][algo][sid] = series_map[thresh]
-
-            # --- Generate Plots I, J, K, L ---
-            for thresh, letter, label_suffix in THRESHOLDS:
-                print(f"Generating Figure {letter} (Tree Size {label_suffix})...")
-                
-                fig, axes = _axes_for_algos(n_algo)
-                for ax, algo in zip(axes, algo_list):
-                    ax.set_title(f"{algo}: Stride-Aligned Coverage ({label_suffix})")
-                    ax.set_xlabel("Week")
-                    ax.set_ylabel("Score" if ax is axes[0] else "")
-
-                    for scn in scenario_ids:
-                        x, ys = results_by_thresh[thresh].get(algo, {}).get(scn, ([], []))
-                        if not ys:
-                            continue
-                        
-                        ax.plot(
-                            x, ys,
-                            marker=marker_map.get(scn, "o"),
-                            linestyle="-",
-                            label=SCEN_LABELS.get(scn, f"Scenario {scn}")
-                        )
-
-                        # Store Metrics (Naming convention: Letter_Label)
-                        eval_type = f"{letter}_coverage_size_{thresh}"
-                        _record_series(eval_type, algo, scn, x, ys)
-
-                    ax.grid(True, linestyle="--", alpha=0.6)
-                    ax.legend(ncol=4, fontsize=8)
-                    ax.set_xlim(left=0.9)
-                    ax.set_ylim(0, 1.05)
-
-                fig.tight_layout()
-                fig_out_path = out_path(f"{letter}_coverage_size_gt_{thresh}_1xN.png")
-                plt.savefig(fig_out_path, dpi=150)
-                print(f"Saved: {fig_out_path}")
-                plt.close(fig)
-
-        # =================== FIGURE M: 8-Week Rolling Tree Coverage ===================
-        if "alias_contact" in line_df.columns:
-            print("Computing 8-Week Rolling Tree Coverage Score (Figure M)...")
-            
-            ROLL_WIN_TREE = 8
-            rolling_tree_scores = {algo: {} for algo in algo_list}
-
-            # If adj_graph isn't already built in your scope from the previous block, build it:
-            if 'adj_graph' not in locals():
-                adj_graph = build_undirected_adj(line_df, pid_col="alias_pid", contact_col="alias_contact")
-
-            for scfg in SCENARIOS:
-                sid = scfg["id"]
-                weekly_samples_scen = all_weekly_samples.get(sid, {})
-                if not weekly_samples_scen:
-                    continue
-
-                eval_idx = _stride_eval_indices(scfg, len(weekly_ll_hist))
-
-                for algo in algo_list:
-                    weeks_list = weekly_samples_scen.get(algo, [])
-                    if not weeks_list:
-                        continue
-
-                    all_samples_df = _prepare_samples_df(weeks_list)
-
-                    xs = []
-                    score_series = []
-                    
-                    for end_idx in eval_idx:
-                        start_idx = max(0, end_idx - ROLL_WIN_TREE + 1)
-                        window_start_date, window_end_date = _calendar_window_bounds(start_idx, end_idx)
-                        
-                        mask_pop = (
-                            (line_df[args.date_field] >= window_start_date) & 
-                            (line_df[args.date_field] <= window_end_date)
-                        )
-                        pt_ids_window = set(line_df.loc[mask_pop, "alias_pid"].astype(str))
-                        
-                        mask_sample = (
-                            (all_samples_df[args.date_field] >= window_start_date) & 
-                            (all_samples_df[args.date_field] <= window_end_date)
-                        )
-                        s_col = "alias_pid" if "alias_pid" in all_samples_df.columns else "pid"
-                        s_ids_window = set(all_samples_df.loc[mask_sample, s_col].astype(str))
-                        
-                        score = calculate_coverage_score(pt_ids_window, s_ids_window, adj_graph)
-                        xs.append(end_idx + 1)
-                        score_series.append(score)
-
-                    rolling_tree_scores[algo][sid] = (xs, score_series)
-
-            # --- Plot Figure M ---
-            figM, axesM = _axes_for_algos(n_algo)
-            for ax, algo in zip(axesM, algo_list):
-                ax.set_title(f"{algo}: 8-Week Rolling Tree Coverage (Stride-Aligned)")
-                ax.set_xlabel("Week")
-                ax.set_ylabel("Coverage Score (0-1)" if ax is axesM[0] else "")
-
-                for scn in scenario_ids:
-                    x, ys = rolling_tree_scores.get(algo, {}).get(scn, ([], []))
-                    if not ys:
-                        continue
-                    
-                    ax.plot(
-                        x, ys,
-                        marker=marker_map.get(scn, "o"),
-                        linestyle="-",
-                        label=SCEN_LABELS.get(scn, f"Scenario {scn}")
-                    )
-
-                    _record_series("M_8_week_rolling_tree_coverage", algo, scn, x, ys, roll_window=8)
-
-                ax.grid(True, linestyle="--", alpha=0.6)
-                ax.legend(ncol=4, fontsize=8)
-                ax.set_xlim(left=0.9)
-                ax.set_ylim(0, 1.05)
-
-            figM.tight_layout()
-            outM = out_path("M_tree_coverage_rolling8_1xN.png")
-            plt.savefig(outM, dpi=150)
-            print(f"Saved: {outM}")
-            plt.close(figM)
+        # NOTE: figure D (weekly pool/infection/sample ratios) also moved to
+        # PhyloGAS -- it divides by true infection counts, which only the ABM
+        # knows. See docs/cste_notebook_inputs.md.
 
         # =================== FIGURE N: Longitudinal Equity Heatmap (By Age Group) ===================
         if "alias_contact" in line_df.columns and "age_group" in line_df.columns:
