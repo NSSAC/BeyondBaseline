@@ -742,6 +742,105 @@ def main():
     # no longer built here; those metrics moved to PhyloGAS. See the note below
     # where figures B/C/E/F/I-M used to be.
 
+    # ---------------------------------------------------------------------
+    # Run every scenario x algorithm, and save the selected samples.
+    #
+    # Ground-truth scoring of these samples moved to PhyloGAS; what remains
+    # here is the selection itself plus --save-samples, which is how PhyloGAS
+    # receives the choices:
+    #   phylogas benchmark truth --samples 'runs/*_samples.csv.xz' ...
+    # ---------------------------------------------------------------------
+    scenario_ids = [scfg["id"] for scfg in SCENARIOS]
+    scenario_cfg_map = {scfg["id"]: scfg for scfg in SCENARIOS}
+    algo_list  = list(ALG.keys())
+    n_algo    = len(algo_list)
+
+
+    
+    for scfg in SCENARIOS:
+        label = SCEN_LABELS.get(scfg["id"], "")
+        print(f"\n=== Running {scfg['name']} [{label}] ===")
+        weekly_hist, per_algo_eval, per_algo_time, weekly_samples, algo_state = run_one_scenario(
+            line_df, args.date_field, POP_DIST_STATIC, weekly_ll_hist,
+            scfg, rng_master, start_date, args.min_pool, overrides, algorithms=ALG
+        )
+
+        # --- FINAL PRINT FOR THIS SCENARIO ---
+        print(f"--- Results for {scfg['name']} [{label}] ---")
+        for algo_name, sample_weeks_list in weekly_hist.items():
+            # Sum up the total samples from all weeks
+            total_samples = sum(s.sum() for s in sample_weeks_list)
+            num_weeks = len(sample_weeks_list)
+
+            avg_per_week = total_samples / num_weeks if num_weeks > 0 else 0
+            
+            print(f"  > Algorithm: {algo_name:<15} | Total Samples: {int(total_samples):<6} | "
+                  f"Weeks Run: {num_weeks:<3} | Avg/Week: {avg_per_week:.1f}")
+        # -------------------------------------
+
+        all_weekly_hist[scfg["id"]] = weekly_hist
+        all_weekly_samples[scfg["id"]] = weekly_samples
+
+        # save per-scenario CSV + collect for final plots
+        rows = []
+        for algo, ys in per_algo_eval.items():
+            if scfg["id"] in (4, 5, 6):
+                label = f"{algo} Mean KL"
+            elif scfg["eval_metric"] == "kl_vs_linelist_rolling":
+                label = f"{algo} (Rolling {scfg.get('eval_window_weeks',4)}-Week KL)"
+            elif scfg["eval_metric"] == "kl_vs_population_cum":
+                label = f"{algo} vs. Population"
+            else:
+                label = f"{algo} vs. Line List"
+            eval_weeks = evaluation_week_numbers(scfg, len(ys))
+            for week_num, v in zip(eval_weeks, ys):
+                rows.append({"scenario": scfg["id"], "label": label, "week": week_num, "kl": float(v)})
+                # Panel A ("targets"): save KL per week
+                kl_rows.append({
+                    "run_id": run_id,
+                    "linelist_id": linelist_id,
+                    "algorithm": algo,
+                    "scenario_id": scfg["id"],
+                    "scenario_label": label,
+                    "eval_type": "A_targets",
+                    "roll_window": None,
+                    "week": week_num,
+                    "kl": float(v),
+                })
+            scenario_series[algo][scfg["id"]] = (eval_weeks, ys)
+            total_algo_time[algo] += per_algo_time.get(algo, 0.0)
+            count_algo_runs[algo] += 1
+
+        for algo, secs in per_algo_time.items():
+            print(f"  {algo} time: {secs:.2f}s")
+
+# --- POST-PROCESSING FOR THIS SCENARIO (SAMPLES & MUGRATION) ---
+        label = SCEN_LABELS.get(scfg["id"], scfg["name"])
+        if args.save_samples:
+            print(f"  Saving selected samples for {scfg['name']} [{label}]...")
+            
+            for algo_name, sample_weeks_list in weekly_samples.items():
+                if not sample_weeks_list:
+                    continue
+
+                full_sample_df = pd.concat(sample_weeks_list, ignore_index=True)
+                sample_prefix = output_basename if output_basename else run_id
+                
+                # 1. Save Samples
+                if args.save_samples:
+                    full_sample_df_out = full_sample_df.assign(
+                        run_id=run_id,
+                        linelist_id=linelist_id,
+                        scenario_id=scfg["id"],
+                        scenario_name=scfg["name"],
+                        algorithm=algo_name,
+                    )
+                    sample_out_path = outdir / f"{sample_prefix}_scenario{scfg['id']}_{algo_name}_samples.csv.xz"
+                    full_sample_df_out.to_csv(sample_out_path, index=False, compression="xz")
+                    print(f"    - Saved {len(full_sample_df_out)} samples to {sample_out_path.name}")
+
+
+
     # NOTE: mugration benchmarking moved to PhyloGAS (clean break, 2026-09-30).
     # It required ABM ground truth (--infections + --abm_mugration), which a
     # health department running on a real linelist does not have. See
