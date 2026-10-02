@@ -30,6 +30,10 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+import sys
+# Directory holding the sibling modules, for the flat-import fallback below.
+_FLAT_IMPORT_DIR = Path(__file__).resolve().parent.parent
+
 try:
     from ..run_all_scenarios import (
         _normalize_stratifiers,
@@ -47,7 +51,16 @@ try:
     )
     from ..sampling_algorithms import ALGORITHMS as REGISTRY
     from ..sampling_algorithms import kl_dist
-except ImportError:
+except ImportError as exc:
+    # Fall back to flat imports only when there is no parent package, which is
+    # what running this file directly produces -- that ImportError carries no
+    # module name. A dependency missing from inside one of the modules above
+    # (scipy, say) does carry one, and must propagate: swallowing it here made
+    # it resurface from the fallback as a misleading "No module named
+    # <sibling>".
+    if exc.name is not None:
+        raise
+    sys.path.insert(0, str(_FLAT_IMPORT_DIR))
     from run_all_scenarios import (
         _normalize_stratifiers,
         build_undirected_adj,
@@ -75,7 +88,12 @@ try:
         precompute_component_sizes,
     )
     _HAVE_TRUTH = True
-except ImportError:
+except ImportError as exc:
+    # Only PhyloGAS being absent is an acceptable reason to degrade. If it is
+    # installed but something it imports is missing, that is a broken
+    # environment and should say so rather than silently dropping the metrics.
+    if exc.name is not None and not exc.name.split(".")[0] == "phylogas":
+        raise
     build_weekly_infections = None
     build_weekly_variant_counts = None
     precompute_component_sizes = None

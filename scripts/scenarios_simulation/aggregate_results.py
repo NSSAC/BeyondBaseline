@@ -4,9 +4,22 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 
+import sys
+# Directory holding the sibling modules, for the flat-import fallback below.
+_FLAT_IMPORT_DIR = Path(__file__).resolve().parent
+
 try:
     from .eval_names import canonicalize, higher_is_better
-except ImportError:
+except ImportError as exc:
+    # Fall back to flat imports only when there is no parent package, which is
+    # what running this file directly produces -- that ImportError carries no
+    # module name. A dependency missing from inside one of the modules above
+    # (scipy, say) does carry one, and must propagate: swallowing it here made
+    # it resurface from the fallback as a misleading "No module named
+    # <sibling>".
+    if exc.name is not None:
+        raise
+    sys.path.insert(0, str(_FLAT_IMPORT_DIR))
     from eval_names import canonicalize, higher_is_better
 
 def get_stride_group(label):
