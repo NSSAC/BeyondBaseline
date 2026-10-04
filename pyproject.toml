@@ -1,10 +1,11 @@
 [build-system]
-requires = ["setuptools>=69", "wheel"]
+requires = ["setuptools>=69", "setuptools-scm>=8", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "beyond-baseline"
-version = "0.1.0"
+# Derived from git by setuptools-scm; see [tool.setuptools_scm] below.
+dynamic = ["version"]
 description = "Scenario sampling runners and evaluation workflows for BeyondBaseline"
 readme = "scripts/scenarios_simulation/README.md"
 requires-python = ">=3.8"
@@ -37,6 +38,18 @@ scenarios-replicates = "scenarios_simulation.run_replicates:main"
 scenarios-lasso-greedy = "scenarios_simulation.lasso_test.lasso_test_greedy:main"
 scenarios-lasso-stratified = "scenarios_simulation.lasso_test.lasso_test_stratified:main"
 scenarios-aggregate = "scenarios_simulation.aggregate_results:main"
+
+[tool.setuptools_scm]
+# Installed from a git URL, never from a release, so a static version misleads
+# pip: `pip install --upgrade git+...@main` resolves the URL, sees the version
+# it already has, and no-ops. Deriving it from git gives every commit a
+# distinct version so --upgrade has something to compare.
+#
+# REQUIRES AT LEAST ONE TAG. With no tags setuptools-scm emits
+# 0.1.devN+g<hash>, which PEP 440 orders *below* 0.1.0, so pip would refuse it
+# as a downgrade. Past a v0.1.0 tag it emits 0.1.1.devN+g<hash>, which sorts
+# above. fallback_version covers a build with no git metadata.
+fallback_version = "0.1.0.dev0+unknown"
 
 [tool.setuptools]
 package-dir = {"" = "scripts"}
