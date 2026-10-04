@@ -176,7 +176,12 @@ def select_algorithms(registry: dict, requested: list[str]) -> dict:
 STRAT_ALIAS = {
     "age": "age_group",
     "race": "smh_race",
-    "county": "county_fips",
+    # The county NAME, not county_fips. Both the line list and the raw
+    # population file carry `county` from the same persontrait column, so the
+    # values match by construction. county_fips exists only in the line list:
+    # TwinSampler composes it from the household file's admin1+admin2, which
+    # the population file alone cannot supply.
+    "county": "county",
     "sex": "sex",
     "ses": "ses_category",
 }
@@ -309,6 +314,38 @@ def normalize_age_group_col(df, col="age_group"):
     return df
 
 # ----------------- load & preprocess -----------------
+def _check_stratifier_overlap(line_df, pop_df, features, min_overlap=0.5):
+    """Refuse to compare a line list against a denominator it cannot match.
+
+    Every KL metric here is the sampled distribution against the population
+    distribution over the same group key. If a stratifier's categories differ
+    between the two frames, the keys never line up and the divergence is
+    computed against an effectively empty denominator -- which looks like a
+    number rather than an error. That is what an unguarded .map() on
+    smh_race produced: all-NaN in the population, "White" in the line list.
+    """
+    problems = []
+    for col in features:
+        a = set(line_df[col].dropna().unique()) - {"", "nan", "None"}
+        b = set(pop_df[col].dropna().unique()) - {"", "nan", "None"}
+        if not a or not b:
+            problems.append(f"{col}: {'line list' if not a else 'population'} "
+                            f"has no usable values")
+            continue
+        shared = a & b
+        frac = len(shared) / min(len(a), len(b))
+        if frac < min_overlap:
+            problems.append(
+                f"{col}: only {len(shared)} of {min(len(a), len(b))} categories "
+                f"shared ({frac:.0%}). line list e.g. {sorted(a)[:3]}, "
+                f"population e.g. {sorted(b)[:3]}")
+    if problems:
+        raise ValueError(
+            "line list and population disagree on stratifier categories, so "
+            "the KL metrics would be measured against a denominator that "
+            "cannot match:\n  " + "\n  ".join(problems))
+
+
 def load_linelist_and_population(linelist_path, population_path, date_field, start_date, min_pool, features: list[str]):
     line_df = pd.read_csv(linelist_path, parse_dates=[date_field], dtype={'alias_pid': str, 'alias_contact': str, 'sim_pid': str, 'pid': str, 'contact_pid': str})
     #read population_path using read csv. but look ahead if first line is JSON then skip it.
@@ -326,12 +363,18 @@ def load_linelist_and_population(linelist_path, population_path, date_field, sta
 
     pop_df = pop_df.rename(columns={"gender": "sex"})
     pop_df["sex"]      = pop_df["sex"].astype(str).map({"1": "male", "2": "female"})
+    # .fillna(original) because the persontrait file already holds expanded
+    # names ("White"), which are not keys here -- an unguarded .map() turned
+    # every population row's race into NaN while the line list kept "White",
+    # so no group key matched and every KL figure was computed against an
+    # empty denominator. Same shape of fallback DemographicsLoader uses.
     pop_df["smh_race"] = pop_df["smh_race"].astype(str).map({
         "W": "White", "B": "Black", "L": "Latino", "A": "Asian", "O": "Other"
-    })
+    }).fillna(pop_df["smh_race"])
 
     line_df = make_group(line_df, features)
     pop_df  = make_group(pop_df,  features)
+    _check_stratifier_overlap(line_df, pop_df, features)
     pop_dist_static = pop_df["group"].value_counts(normalize=True).sort_index()
 
     # weekly linelist history
