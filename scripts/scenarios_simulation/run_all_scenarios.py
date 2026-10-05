@@ -20,8 +20,10 @@ import sys
 _FLAT_IMPORT_DIR = Path(__file__).resolve().parent
 
 try:
+    from .recipes import recipe_id, sample_filename
     from .scenarios_config import (
         SCENARIOS,
+        SCEN_LABELS,
         GROUP_FEATURES,
         DATE_FIELD_DEFAULT,
         START_DATE_DEFAULT,
@@ -38,8 +40,10 @@ except ImportError as exc:
     if exc.name is not None:
         raise
     sys.path.insert(0, str(_FLAT_IMPORT_DIR))
+    from recipes import recipe_id, sample_filename
     from scenarios_config import (
         SCENARIOS,
+        SCEN_LABELS,
         GROUP_FEATURES,
         DATE_FIELD_DEFAULT,
         START_DATE_DEFAULT,
@@ -549,10 +553,6 @@ def series_auc(ys, xs=None):
 #     4: "CS-C(LL,P)", 5: "RS-R(LL,P)", 6: "RS-C(LL,P)",
 #     7: "CS-P", 8: "RS-P",
 # }
-SCEN_LABELS = {
-    1: "1S–1(LL)", 2: "4S–4(LL)", 3: "1S–1(LL,P)",
-    4: "4S–4(LL,P)", 5: "1S–P", 6: "4S–P",
-}
 
 
 # ----------------- scenario runner (seeded) -----------------
@@ -891,7 +891,15 @@ def main():
                         scenario_name=scfg["name"],
                         algorithm=algo_name,
                     )
-                    sample_out_path = outdir / f"{sample_prefix}_scenario{scfg['id']}_{algo_name}_samples.csv.xz"
+                    # The recipe id is the cross-repo contract (recipes.py):
+                    # a consumer names it in config and finds this file by it.
+                    # Previously the stem came from Path(linelist).stem, which
+                    # for linelist.csv.xz is "linelist.csv", plus the seed --
+                    # so the name was neither predictable nor referable.
+                    rid = recipe_id(scfg["id"], algo_name)
+                    sample_out_path = outdir / (
+                        f"{output_basename}_{sample_filename(rid)}"
+                        if output_basename else sample_filename(rid))
                     full_sample_df_out.to_csv(sample_out_path, index=False, compression="xz")
                     print(f"    - Saved {len(full_sample_df_out)} samples to {sample_out_path.name}")
 

@@ -15,6 +15,28 @@ BATCH_CAP_DEFAULT  = 1000
 MIN_PER_GROUP_DEFAULT = 10
 BLEND_ALPHA = 0.5
 
+# Algorithm names, kept here rather than in sampling_algorithms so that
+# listing recipes does not require scipy/sklearn. sampling_algorithms asserts
+# its registry matches this tuple, so the two cannot drift.
+ALGORITHM_NAMES = (
+    "SURS",
+    "Uniform Random",
+    "Greedy",
+    "Stratified",
+    "RL",
+    "LASSO-Greedy",
+    "LASSO-Stratified",
+)
+
+# Human-readable label per scenario id. The slug half of a recipe id is
+# derived from these (see recipes.py), so editing a label changes a cross-repo
+# contract: PhyloGAS names recipes in its config and BeyondBaseline writes
+# them into sample filenames.
+SCEN_LABELS = {
+    1: "1S-1(LL)", 2: "4S-4(LL)", 3: "1S-1(LL,P)",
+    4: "4S-4(LL,P)", 5: "1S-P", 6: "4S-P",
+}
+
 SCENARIOS = [
 # 1) CS–C(LL)
 # { "id": 1, "name": "Scenario 1",

@@ -38,6 +38,9 @@ scenarios-replicates = "scenarios_simulation.run_replicates:main"
 scenarios-lasso-greedy = "scenarios_simulation.lasso_test.lasso_test_greedy:main"
 scenarios-lasso-stratified = "scenarios_simulation.lasso_test.lasso_test_stratified:main"
 scenarios-aggregate = "scenarios_simulation.aggregate_results:main"
+# The recipe index. A downstream config names recipes by these ids, so the
+# list has to be discoverable without reading the source.
+scenarios-recipes = "scenarios_simulation.recipes:main"
 
 [tool.setuptools_scm]
 # Installed from a git URL, never from a release, so a static version misleads

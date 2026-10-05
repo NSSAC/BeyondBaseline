@@ -1163,3 +1163,17 @@ ALGORITHMS = {
     "LASSO-Greedy" : lasso_clustered_vecgreedy_sampler,
     "LASSO-Stratified": lasso_clustered_stratified_sampler,
 }
+
+# scenarios_config lists these names without importing this module, so that
+# `scenarios-recipes` can enumerate recipes without scipy or sklearn. Assert
+# rather than duplicate silently: a new sampler added here but not there would
+# otherwise be absent from every recipe id.
+try:
+    from .scenarios_config import ALGORITHM_NAMES
+except ImportError:                                    # flat import
+    from scenarios_config import ALGORITHM_NAMES
+_missing = set(ALGORITHMS) ^ set(ALGORITHM_NAMES)
+if _missing:
+    raise RuntimeError(
+        f"ALGORITHMS and scenarios_config.ALGORITHM_NAMES disagree on "
+        f"{sorted(_missing)}. Add the sampler to both.")
