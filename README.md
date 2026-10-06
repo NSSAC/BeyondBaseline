@@ -143,12 +143,41 @@ beyond-baseline-sweep \
     --infections replicate_0/linelist_allevents.csv.xz \
     --outdir     runs/ \
     --batch-size 400 --no-replacement --seed 42 --save-samples \
-    --algorithms surs stratified LASSO-Greedy LASSO-Stratified \
+    --algorithms surs stratified lasso_greedy lasso_stratified \
     --stratifiers age race county sex
 ```
 
 Outputs `KL_series.csv`, `AUC_rankings.csv` and, with `--save-samples`, the
 selected cases per scenario and algorithm.
+
+`--algorithms` accepts registry names (`LASSO-Greedy`), the aliases listed in
+`--help`, or the recipe slug (`lasso_greedy`, `uniform_random`). The slug is
+the cross-repo spelling: it is what PhyloGAS passes from `sampling.algorithms`.
+
+### Recipes and sample files
+
+A **recipe** is one scenario (stride, pool window, target) plus one algorithm,
+and is what downstream tools name. Its id is `<scenario>__<algorithm slug>`,
+and `--save-samples` writes `<recipe id>_samples.csv.xz`:
+
+```
+4S-4_LL-P__lasso_greedy_samples.csv.xz    # 4-week stride, 4-week pool, LL,P target
+4S__surs_samples.csv.xz                   # SURS: stride only
+```
+
+SURS ignores the target and pool window, so all scenarios sharing a stride
+draw the same sample. Those collapse to one recipe per stride (`1S__surs`,
+`4S__surs`) rather than writing identical files under different names — 38
+recipes in all. Old ids such as `4S-4_LL-P__surs` still resolve, as aliases.
+
+```bash
+scenarios-recipes          # print every recipe id, its scenarios, and its sample file
+```
+
+SURS sampling is seeded from `--seed` (per algorithm, per week), so several
+draws on one line list differ and sampling replicates are meaningful. Before
+this fix SURS was a pure function of the line list — its samples are not
+bit-identical to those from earlier releases.
 
 Multiple replicates:
 
@@ -185,6 +214,7 @@ mapping.
 | `beyond-baseline-aggregate` | research — aggregate across replicates |
 | `beyond-baseline-lasso-greedy` | LASSO-Greedy group-size sweep |
 | `beyond-baseline-lasso-stratified` | LASSO-Stratified group-size sweep |
+| `scenarios-recipes` | print the recipe index (ids and sample filenames) |
 
 Older names remain available and behave identically, so existing sbatch
 scripts keep working:
@@ -210,16 +240,19 @@ works.
 | column | notes |
 |---|---|
 | `date` | report or collection date (`--date-field` to rename) |
-| `age_group`, `sex`, `smh_race`, `county_fips` | whichever you pass to `--stratifiers` |
+| `age_group`, `sex`, `smh_race`, `county` | whichever you pass to `--stratifiers` |
 | `alias_pid` | case identifier |
 | `alias_contact` | infector, if known — enables coverage metrics |
 
 **Population** — the sampling frame, in EpiHiper persontrait format: a JSON
-schema line, then a header with `pid`, `gender`, `county_fips`, `smh_race`,
+schema line, then a header with `pid`, `gender`, `county`, `smh_race`,
 `age_group`.
 
 `--stratifiers` accepts the short names `age`, `race`, `county`, `sex`, `ses`,
-which map onto `age_group`, `smh_race`, `county_fips`, `sex`, `ses_category`.
+which map onto `age_group`, `smh_race`, `county`, `sex`, `ses_category`.
+`county` is the county **name**, present in both the line list and the
+persontrait file; `county_fips` exists only in TwinSampler line lists and so
+cannot be matched against the population.
 
 ---
 
