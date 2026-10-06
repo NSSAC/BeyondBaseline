@@ -20,7 +20,7 @@ import sys
 _FLAT_IMPORT_DIR = Path(__file__).resolve().parent
 
 try:
-    from .recipes import recipe_id, sample_filename
+    from .recipes import algo_slug, recipe_id, sample_filename
     from .scenarios_config import (
         SCENARIOS,
         SCEN_LABELS,
@@ -40,7 +40,7 @@ except ImportError as exc:
     if exc.name is not None:
         raise
     sys.path.insert(0, str(_FLAT_IMPORT_DIR))
-    from recipes import recipe_id, sample_filename
+    from recipes import algo_slug, recipe_id, sample_filename
     from scenarios_config import (
         SCENARIOS,
         SCEN_LABELS,
@@ -145,7 +145,16 @@ ALGO_ALIASES = {
 
 def _normalize_algo_name(name: str) -> str:
     key = name.strip().lower()
-    return ALGO_ALIASES.get(key, name.strip())
+    if key in ALGO_ALIASES:
+        return ALGO_ALIASES[key]
+    # Accept every registry name by its recipe slug too ("lasso_greedy" ->
+    # "LASSO-Greedy"). The slug is the cross-repo spelling: it is what
+    # recipe ids and sample filenames carry and what PhyloGAS passes from
+    # sampling.algorithms. Deriving it from the registry means a newly added
+    # sampler is reachable by slug without another alias entry -- the LASSO
+    # samplers had none, so --algorithms lasso_greedy failed outright.
+    by_slug = {algo_slug(n): n for n in REGISTRY}
+    return by_slug.get(algo_slug(name), name.strip())
 
 def select_algorithms(registry: dict, requested: list[str]) -> dict:
     """
