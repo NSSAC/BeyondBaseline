@@ -1,6 +1,8 @@
---- /tmp/ras.orig.py	2026-10-05 18:37:39.537003518 +0000
-+++ scripts/scenarios_simulation/run_all_scenarios.py	2026-10-05 18:37:39.736055586 +0000
-@@ -591,7 +591,23 @@
+diff --git a/scripts/scenarios_simulation/run_all_scenarios.py b/scripts/scenarios_simulation/run_all_scenarios.py
+index 4fdb893..991c109 100644
+--- a/scripts/scenarios_simulation/run_all_scenarios.py
++++ b/scripts/scenarios_simulation/run_all_scenarios.py
+@@ -591,7 +591,23 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
          stride_weeks = sampling_stride_weeks(scfg)
  
          if algo_name == "SURS":
@@ -25,7 +27,7 @@
  
          # For no-replacement: track used base indices (from line_df) per algorithm
          used_idx: set[int] = set()
-@@ -680,6 +696,11 @@
+@@ -680,6 +696,11 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
              else:
                  prior_groups = list(history_list) + [g for lst in list(recent) for g in lst]
  
