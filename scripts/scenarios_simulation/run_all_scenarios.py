@@ -591,7 +591,23 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
         stride_weeks = sampling_stride_weeks(scfg)
 
         if algo_name == "SURS":
-            state["base_seed"] = overrides.get("base_seed", 0)
+            # pure_uniform_sampler makes no rng calls: it selects on a hash of
+            # (row index, base_seed, week_idx). Both seed inputs were frozen --
+            # base_seed defaulted to 0 with nothing ever setting it, and
+            # week_idx was never set because the driver wrote "week_id" -- so
+            # SURS was a pure function of the line list. Across-replicate
+            # variation worked only because run_replicates.py changes the input
+            # folder, and so the row indices.
+            #
+            # That made within-output sampling replicates impossible: several
+            # draws on one line list are identical, so SURS would show a
+            # structural zero variance while every rng-using sampler showed
+            # real spread -- an artifact that reads as a finding. Seeded from
+            # the per-algorithm rng instead, which already derives from
+            # rng_master by a stable split and which SURS otherwise ignores.
+            # Drawn once, before the week loop, so it is fixed within a run.
+            state["base_seed"] = overrides.get(
+                "base_seed", int(algo_rngs[algo_name].integers(0, 2**31 - 1)))
 
         # For no-replacement: track used base indices (from line_df) per algorithm
         used_idx: set[int] = set()
@@ -680,6 +696,11 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
             else:
                 prior_groups = list(history_list) + [g for lst in list(recent) for g in lst]
 
+            # "week_idx" is the key pure_uniform_sampler reads
+            # (state.get("week_idx", 0)); "week_id" was a typo that left it at
+            # 0 every week, so SURS never rehashed per week. Both are set:
+            # other readers use "week_id".
+            state["week_idx"] = week_idx_for_target
             state["week_id"] = week_idx_for_target
             state["scenario_id"] = scfg.get("id")
             state["algo_name"] = algo_name
