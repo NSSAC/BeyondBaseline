@@ -225,7 +225,9 @@ def greedy_kl_sampler_vectorized(
                 c[idx] += float(cnt)
 
     # ---- capacities (how many we can still draw this week) ----
-    cap = avail_counts.to_numpy(dtype=int)
+    # copy=True: decremented below, and under pandas Copy-on-Write (the
+    # default from pandas 3.0) to_numpy() may hand back a read-only view.
+    cap = avail_counts.to_numpy(dtype=int, copy=True)
 
     # ---- pre-shuffle per-group row indices for O(1) draws ----
     # build group -> shuffled index array and a position pointer
@@ -739,8 +741,11 @@ def lasso_clustered_vecgreedy_sampler(
 
     # supergroup arrays
     qS = agg["q"].to_numpy(dtype=float)
-    capS = agg["cap"].to_numpy(dtype=int)
-    cS = agg["c"].to_numpy(dtype=float)
+    # copy=True: both are updated in place in the greedy loop, and under
+    # pandas Copy-on-Write to_numpy() may return a read-only view
+    # ("assignment destination is read-only").
+    capS = agg["cap"].to_numpy(dtype=int, copy=True)
+    cS = agg["c"].to_numpy(dtype=float, copy=True)
     nS = len(agg)
 
     # Map cluster -> member groups frame (for fan-out later)
