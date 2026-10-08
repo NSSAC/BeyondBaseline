@@ -34,6 +34,39 @@ def _rint(rng: np.random.Generator) -> int:
     # pandas accepts an int seed; use full 32-bit range for variety
     return int(rng.integers(0, 2**32 - 1, dtype=np.uint32))
 
+def _weighted_sample_no_replace(pool, n, weights, seed):
+    """Draw `n` rows of `pool` without replacement, proportional to `weights`.
+
+    pandas' `DataFrame.sample(weights=..., replace=False)` refuses whenever
+    n * (largest normalised row weight) > 1. The backfill gives every row its
+    group's whole target share, so a small group with a large share trips that
+    as soon as the shortfall is large -- "Weighted sampling cannot be achieved
+    with replace=False" on Georgia and Minnesota, not on Virginia.
+
+    Efraimidis-Spirakis instead: key = u ** (1 / w), take the n largest. That is
+    exact weighted sampling without replacement and has no such limit. Rows of
+    zero weight are drawn only once the weighted rows run out, uniformly among
+    themselves, so the batch is still filled. `weights=None` means uniform.
+    """
+    import numpy as _np
+    n = int(min(n, len(pool)))
+    if n <= 0:
+        return pool.iloc[0:0]
+    gen = _np.random.default_rng(seed)
+    if weights is None:
+        return pool.iloc[gen.choice(len(pool), size=n, replace=False)]
+    w = _np.asarray(weights, dtype=float)
+    w = _np.where(_np.isfinite(w) & (w > 0), w, 0.0)
+    u = gen.random(len(pool))
+    keys = _np.full(len(pool), -_np.inf)
+    pos = w > 0
+    keys[pos] = _np.log(u[pos]) / w[pos]          # log(u ** (1/w)), stable
+    # Zero-weight rows rank below every weighted row, in random order.
+    keys[~pos] = -1e300 * (1.0 + u[~pos])
+    order = _np.argsort(-keys, kind="stable")[:n]
+    return pool.iloc[order]
+
+
 # ----------------- samplers -----------------
 def reward_function(group, all_groups, target_dist, eps=1e-9):
     current = pd.Series(all_groups).value_counts(normalize=True)
@@ -307,12 +340,9 @@ def greedy_kl_sampler_vectorized(
             else:
                 sample_weights = None # Fallback to uniform if targets are zero
                 
-            filler = remaining_pool.sample(
-                n=min(shortfall, len(remaining_pool)), 
-                replace=False, 
-                weights=sample_weights,
-                random_state=_rint(rng)
-            )
+            filler = _weighted_sample_no_replace(
+                remaining_pool, min(shortfall, len(remaining_pool)),
+                sample_weights, _rint(rng))
             out = pd.concat([out, filler])
 
     return out.reset_index(drop=True)
@@ -871,12 +901,9 @@ def lasso_clustered_vecgreedy_sampler(
             else:
                 sample_weights = None
                 
-            filler = remaining_pool.sample(
-                n=min(shortfall, len(remaining_pool)), 
-                replace=False, 
-                weights=sample_weights,
-                random_state=_rint(rng)
-            )
+            filler = _weighted_sample_no_replace(
+                remaining_pool, min(shortfall, len(remaining_pool)),
+                sample_weights, _rint(rng))
             out = pd.concat([out, filler])
 
     # --- compute KL at group level (prior + this batch) ---
