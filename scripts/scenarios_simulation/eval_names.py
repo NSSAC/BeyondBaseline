@@ -85,9 +85,13 @@ EVALS: dict[str, EvalSpec] = {
 
 # Per-stratifier metrics, named ``<prefix><stratifier>`` at run time.
 EVAL_PREFIXES: dict[str, EvalSpec] = {
+    # needs_truth: it is tree coverage (Mean Reciprocal Distance) on the
+    # transmission graph built from alias_contact, which a real line list
+    # does not carry. Recorded as False until 2026-10-09, which is why it was
+    # left behind when the truth metrics moved and then stopped running.
     "equity_": EvalSpec(
-        True, "Equity", False,
-        "per-stratum tree coverage, one series per stratum",
+        True, "Equity", True,
+        "per-age-group tree coverage (1/|Pt|) sum_u 1/(d(u,S)+1), cumulative",
     ),
 }
 

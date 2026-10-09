@@ -32,8 +32,15 @@
    KL vs census (P)                         beyond-baseline-sweep
    KL vs linelist (LL)                      beyond-baseline-sweep
    KL vs blended (LL,P)                     beyond-baseline-sweep
-   Coverage / Mean Reciprocal Distance      beyond-baseline-sweep
-   AUC_rankings.csv                         beyond-baseline-sweep   (unchanged)
+   AUC_rankings.csv  (kl_targets)           beyond-baseline-sweep
+   ---------------------------------------- ------------------------------
+   Mean Reciprocal Distance: coverage_size_*,
+     8_week_rolling_tree_coverage,
+     equity_<age group>                     phylogas benchmark truth
+   stride_component_coverage                phylogas benchmark truth
+   stride_variant_prevalence_error          phylogas benchmark truth
+   cumulative_infections,
+     stride_window_infections               phylogas benchmark truth
    KL_series.csv                            beyond-baseline-sweep   (unchanged)
    *_samples.csv.xz                         beyond-baseline-sweep   (unchanged)
    ---------------------------------------- ------------------------------

@@ -263,9 +263,16 @@ Three independent axes:
 1. **Demographic representativeness** — KL divergence of the sample against
    census, line list, or blended targets.
 2. **Variant accuracy** — absolute error in estimated variant prevalence.
-3. **Transmission topology** — Mean Reciprocal Distance for tree coverage;
-   cosine similarity and topological F1 for geographic flow (these last two
-   now computed by PhyloGAS, which holds the ground truth).
+3. **Transmission topology** — Mean Reciprocal Distance for tree coverage
+   (cumulative, by tree size, over an 8-week window, and per age group),
+   component coverage, and cosine similarity and topological F1 for
+   geographic flow.
+
+Only the first axis is computed here, as `kl_targets` in `AUC_rankings.csv`.
+The other two need the simulation's ground truth -- true variant counts and
+the transmission graph -- which a real line list does not carry, so PhyloGAS
+computes them (`phylogas benchmark truth`, `phylogas benchmark mugration`).
+This keeps the sweep runnable by a health department on its own data.
 
 Supports sliding windows, multi-week strides (`4S-4`), no-replacement pooling,
 and SLURM array submission for large sweeps.

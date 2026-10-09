@@ -1061,15 +1061,19 @@ def main():
         })
 
     if not args.no_plots:
-        # NOTE: the plotting path has pre-existing NameErrors (scenario_ids,
-        # n_algo, algo_list are referenced before assignment) and has never
-        # been exercised -- every recorded production invocation passes
-        # --no-plots. Rather than half-fix it while moving the metrics out,
-        # it is disabled with an explicit message. The metric CSVs are
-        # unaffected; plots were always regenerated from those in notebooks.
-        print("\nNOTE: built-in plotting is currently disabled (pre-existing bugs in")
-        print("      this path, unrelated to the benchmark move). The metric CSVs are")
-        print("      still written; plot from those. Pass --no-plots to silence this.")
+        # NOTE: this path was disabled on 2026-10-01, during the move of the
+        # ground-truth metrics to PhyloGAS, on the claim that it had
+        # pre-existing NameErrors and had never run. Both were wrong: the
+        # move's own first commit (bb8f2fd) removed the definitions of
+        # scenario_ids, n_algo and algo_list, which 7307403 later restored,
+        # and before the move this block ran whenever plots were on -- it is
+        # where every truth metric and the kl_targets AUC were computed.
+        # The metrics now live elsewhere (kl_targets AUC below; the rest in
+        # `phylogas benchmark truth`), so what remains here is figure
+        # drawing only. It has not been re-tested since the move.
+        print("\nNOTE: built-in plotting is disabled while it is re-tested after the")
+        print("      2026-10-01 metrics move. The metric CSVs are still written; plot")
+        print("      from those. Pass --no-plots to silence this.")
         args.no_plots = True
 
     if False:
@@ -1086,14 +1090,7 @@ def main():
                 x, y = scenario_series[algo][scn]
                 label = SCEN_LABELS[scn]
                 ax.plot(x, y, marker=marker_map.get(scn, "o"), linestyle="-", label=label)
-                auc_rows.append({
-                    "eval_type": "kl_targets",
-                    "algorithm": algo,
-                    "scenario_id": scn,
-                    "scenario_label": label,
-                    "weeks": len(y),
-                    "auc": series_auc(y, x),
-                    })
+                # kl_targets AUC is recorded after the plotting block.
             ax.grid(True, linestyle="--", alpha=0.6); ax.legend(ncol=4, fontsize=8); ax.set_xlim(left=0.9)
         figA.tight_layout()
         outA = out_path("kl_targets_table_1xN.png")
@@ -1116,126 +1113,34 @@ def main():
         # PhyloGAS -- it divides by true infection counts, which only the ABM
         # knows. See docs/cste_notebook_inputs.md.
 
-        # =================== FIGURE N: Longitudinal Equity Heatmap (By Age Group) ===================
-        if "alias_contact" in line_df.columns and "age_group" in line_df.columns:
-            print("Computing Longitudinal Equity Heatmaps by Age Group...")
-
-            # 1. Get unique, valid age groups from the linelist
-            age_groups = sorted([ag for ag in line_df["age_group"].dropna().unique() if str(ag) != "nan"])
-            
-            # Data structure: age_cov[age_group][algo][scenario_id] = (week_numbers, scores)
-            age_cov = {ag: {algo: {} for algo in algo_list} for ag in age_groups}
-
-            # Ensure adj_graph is available
-            if 'adj_graph' not in locals():
-                adj_graph = build_undirected_adj(line_df, pid_col="alias_pid", contact_col="alias_contact")
-
-            # --- Compute Scores ---
-            for scfg in SCENARIOS:
-                sid = scfg["id"]
-                weekly_samples_scen = all_weekly_samples.get(sid, {})
-                if not weekly_samples_scen:
-                    continue
-
-                eval_idx = _stride_eval_indices(scfg, len(weekly_ll_hist))
-
-                for algo in algo_list:
-                    weeks_list = weekly_samples_scen.get(algo, [])
-                    if not weeks_list:
-                        continue
-
-                    all_samples_df = _prepare_samples_df(weeks_list)
-
-                    series_map = {ag: ([], []) for ag in age_groups}
-
-                    for end_idx in eval_idx:
-                        _, week_end_date = _calendar_week_bounds(end_idx)
-
-                        mask_sample = all_samples_df[args.date_field] <= week_end_date
-                        s_col = "alias_pid" if "alias_pid" in all_samples_df.columns else "pid"
-                        s_ids = set(all_samples_df.loc[mask_sample, s_col].astype(str))
-
-                        mask_pop = line_df[args.date_field] <= week_end_date
-                        pop_this_week = line_df.loc[mask_pop]
-
-                        for ag in age_groups:
-                            pt_ag_ids = set(pop_this_week.loc[pop_this_week["age_group"] == ag, "alias_pid"].astype(str))
-                            
-                            score = calculate_coverage_score(pt_ag_ids, s_ids, adj_graph)
-                            xs, ys = series_map[ag]
-                            xs.append(end_idx + 1)
-                            ys.append(score)
-
-                    for ag in age_groups:
-                        age_cov[ag][algo][sid] = series_map[ag]
-                        
-                        ag_clean_csv = ag.replace(' ', '_').replace('/', '_').replace('(', '').replace(')', '')
-                        eval_type = f"equity_{ag_clean_csv}"
-                        
-                        xs, ys = series_map[ag]
-                        _record_series(eval_type, algo, sid, xs, ys)
-
-            # --- Plot the equity heatmaps (one per age group) ---
-            for ag in age_groups:
-                matrix = []
-                valid_row_labels = []
-                all_eval_weeks = sorted({
-                    week_num
-                    for algo in algo_list
-                    for sid in scenario_ids
-                    for week_num in age_cov[ag][algo].get(sid, ([], []))[0]
-                })
-                
-                # Build rows: grouped by Algorithm, then Scenario
-                for algo in algo_list:
-                    for sid in scenario_ids:
-                        xs, ys = age_cov[ag][algo].get(sid, ([], []))
-                        if ys:
-                            row = pd.Series(ys, index=xs, dtype=float).reindex(all_eval_weeks)
-                            matrix.append(row)
-                            valid_row_labels.append(f"{algo} | {SCEN_LABELS.get(sid, f'Scen {sid}')}")
-                
-                if not matrix or not all_eval_weeks:
-                    continue
-                    
-                # Convert to DataFrame for Seaborn
-                matrix_df = pd.DataFrame(matrix, index=valid_row_labels, columns=all_eval_weeks)
-                
-                figN, axN = plt.subplots(figsize=(12, max(6, len(valid_row_labels) * 0.4)))
-                
-                # Plot Heatmap
-                # RdYlGn places 0.0 (Poor Coverage) as Red and 1.0 (Perfect Coverage) as Green
-                sns.heatmap(
-                    matrix_df, 
-                    cmap="RdYlGn", 
-                    vmin=0.0, 
-                    vmax=1.0, 
-                    ax=axN,
-                    cbar_kws={'label': 'Cumulative Tree Coverage Score (0.0 - 1.0)'}
-                )
-                
-                axN.set_title(f"Longitudinal Equity: {ag}\nHow close is the average {ag} to a sampled individual at stride checkpoints?", fontsize=14)
-                axN.set_xlabel("Week", fontsize=12)
-                axN.set_ylabel("Algorithm | Scenario", fontsize=12)
-                
-                # Add horizontal lines to separate the algorithms visually
-                for i in range(1, len(algo_list)):
-                    axN.axhline(i * len(scenario_ids), color='white', linewidth=2)
-                
-                plt.tight_layout()
-                
-                # Sanitize the age group name for saving to the filesystem
-                ag_clean_file = "".join([c if c.isalnum() else "_" for c in ag]).strip("_")
-                outN = out_path(f"equity_heatmap_{ag_clean_file}.png")
-                plt.savefig(outN, dpi=150)
-                print(f"Saved: {outN}")
-                plt.close(figN)
-        else:
-            print("Missing 'contact_pid' or 'age_group' column; skipping the equity heatmaps.")
+        # NOTE: figure N (equity: tree coverage per age group) moved to PhyloGAS
+        # (2026-10-09) as the equity_<age group> metrics of `phylogas benchmark
+        # truth`. It is Mean Reciprocal Distance on the transmission graph,
+        # built from alias_contact -- who infected whom -- which a real line
+        # list does not carry. It was left here in the first move on the
+        # reading that it needed only the line list, and so stopped being
+        # computed when this plotting block was disabled.
 
     else:
         print("\n--no-plots flag detected. Skipping plot generation.")
     
+    # =================== kl_targets AUC ===================
+    # Computed from the series the scenario loop recorded. It used to be added
+    # while drawing figure A, so when plotting was disabled AUC_rankings.csv
+    # lost its only remaining metric and the sweep printed "No AUC data was
+    # collected" on every run. kl_targets is the ranking this sweep owns -- it
+    # needs only the line list -- so it is computed here, plots or not.
+    for algo, by_scn in scenario_series.items():
+        for scn, (x, y) in by_scn.items():
+            auc_rows.append({
+                "eval_type": "kl_targets",
+                "algorithm": algo,
+                "scenario_id": scn,
+                "scenario_label": SCEN_LABELS.get(scn, f"Scenario {scn}"),
+                "weeks": len(y),
+                "auc": series_auc(y, x),
+            })
+
     # ------------------- Save evaluation series for uncertainty bands -------------------
     kl_df = pd.DataFrame(kl_rows)
     kl_out = out_path("KL_series.csv")
