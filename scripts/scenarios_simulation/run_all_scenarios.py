@@ -65,7 +65,10 @@ def parse_args():
                          "alias_contact edges for the coverage figures.")
     ap.add_argument("--date-field", default=DATE_FIELD_DEFAULT, help=f"Linelist date column (default: {DATE_FIELD_DEFAULT})")
     ap.add_argument("--start-date", default=str(START_DATE_DEFAULT.date()), help=f"Week slicing anchor date (default: {START_DATE_DEFAULT.date()})")
-    ap.add_argument("--min-pool", type=int, default=MINIMUM_POOL_SIZE_DEFAULT, help=f"Minimum weekly pool size (default: {MINIMUM_POOL_SIZE_DEFAULT})")
+    ap.add_argument("--min-pool", type=int, default=MINIMUM_POOL_SIZE_DEFAULT,
+                    help=("End of the sampling window: sampling runs from week 0 through the last "
+                          "week with at least this many line-list cases; sparser weeks inside "
+                          f"the window are still sampled (default: {MINIMUM_POOL_SIZE_DEFAULT})"))
     ap.add_argument("--outdir", default="result", help="Output directory for CSVs/plots (default: result)")
     ap.add_argument("--outname", default=None, help="Optional basename prefix for all output files.")
     ap.add_argument("--seed", type=int, default=42, help="Global random seed (default: 42)")
@@ -359,6 +362,24 @@ def _check_stratifier_overlap(line_df, pop_df, features, min_overlap=0.5):
             "cannot match:\n  " + "\n  ".join(problems))
 
 
+def sampling_week_count(line_df, date_field, start_date, min_pool) -> int:
+    """Weeks the sampler runs: week 0 through the last week with >= min_pool cases.
+
+    Week w is [start_date - 7d + 7w, start_date - 1d + 7w]. min_pool marks the
+    end of the wave, not the viability of each week: sparse or empty weeks
+    inside the window are still sampled (a budget that covers the pool takes
+    all of it). It used to be the first week below min_pool that ended the
+    run, so a thin opening week -- the start of a wave, when introductions
+    happen -- ended sampling before it began, and any mid-wave dip cut off
+    everything after it. `phylogas benchmark truth` counts weeks the same way.
+    """
+    week0 = start_date - timedelta(days=7)
+    wk = (pd.to_datetime(line_df[date_field], errors="coerce") - week0).dt.days // 7
+    counts = wk[wk >= 0].value_counts()
+    viable = counts[counts >= min_pool]
+    return int(viable.index.max()) + 1 if len(viable) else 0
+
+
 def load_linelist_and_population(linelist_path, population_path, date_field, start_date, min_pool, features: list[str]):
     line_df = pd.read_csv(linelist_path, parse_dates=[date_field], dtype={'alias_pid': str, 'alias_contact': str, 'sim_pid': str, 'pid': str, 'contact_pid': str})
     #read population_path using read csv. but look ahead if first line is JSON then skip it.
@@ -390,20 +411,30 @@ def load_linelist_and_population(linelist_path, population_path, date_field, sta
     _check_stratifier_overlap(line_df, pop_df, features)
     pop_dist_static = pop_df["group"].value_counts(normalize=True).sort_index()
 
-    # weekly linelist history
+    # weekly linelist history, one entry per sampled week (empty weeks kept)
     weekly_ll_hist = []
     cur = start_date
-    while True:
+    for _ in range(sampling_week_count(line_df, date_field, start_date, min_pool)):
         prev_mon = cur - timedelta(days=7)
         prev_sun = cur - timedelta(days=1)
         wk = line_df[(line_df[date_field] >= prev_mon) & (line_df[date_field] <= prev_sun)]
-        if len(wk) < min_pool:
-            break
         weekly_ll_hist.append(wk["group"].value_counts())
         cur += timedelta(weeks=1)
 
     return line_df, pop_df, pop_dist_static, weekly_ll_hist
 
+
+def _kl_or_nan(sample_counts, ref_dist):
+    """KL of a sample against a reference; NaN when there is no sample yet.
+
+    kl_dist clips zeros before normalising, so an empty sample would come out
+    as a uniform distribution and a finite, meaningless KL. Weeks with no
+    reported cases are sampled now (see sampling_week_count), so this case is
+    real; NaN keeps it out of the AUC, which ignores NaNs.
+    """
+    if sample_counts.sum() == 0 or ref_dist.sum() == 0:
+        return float("nan")
+    return kl_dist(sample_counts / sample_counts.sum(), ref_dist / ref_dist.sum())
 
 def cum_kl_vs_linelist(weekly_sample_hist, weekly_ll_hist):
     cum_s, cum_l = pd.Series(dtype=float), pd.Series(dtype=float)
@@ -412,14 +443,14 @@ def cum_kl_vs_linelist(weekly_sample_hist, weekly_ll_hist):
     for i in range(n):
         cum_s = cum_s.add(weekly_sample_hist[i], fill_value=0)
         cum_l = cum_l.add(weekly_ll_hist[i],     fill_value=0)
-        out.append(kl_dist(cum_s / cum_s.sum(), cum_l / cum_l.sum()))
+        out.append(_kl_or_nan(cum_s, cum_l))
     return out
 
 def cum_kl_vs_population(weekly_sample_hist, pop_dist):
     cum_s = pd.Series(dtype=float); out = []
     for wk in weekly_sample_hist:
         cum_s = cum_s.add(wk, fill_value=0)
-        out.append(kl_dist(cum_s / cum_s.sum(), pop_dist))
+        out.append(_kl_or_nan(cum_s, pop_dist))
     return out
 
 def roll_kl_vs_linelist(weekly_sample_hist, weekly_ll_hist, window_weeks=4):
@@ -431,7 +462,7 @@ def roll_kl_vs_linelist(weekly_sample_hist, weekly_ll_hist, window_weeks=4):
         for j in range(start, i + 1):
             s = s.add(weekly_sample_hist[j], fill_value=0)
             l = l.add(weekly_ll_hist[j],     fill_value=0)
-        out.append(kl_dist(s / s.sum(), l / l.sum()))
+        out.append(_kl_or_nan(s, l))
     return out
 
 def linelist_dist_at_week(weekly_ll_hist, week_idx, mode="cumulative", window_weeks=4):
@@ -554,7 +585,9 @@ def series_auc(ys, xs=None):
     m = np.isfinite(y)
     if m.sum() < 2:
         return float("nan")
-    trapz_fn = getattr(np, "trapezoid", np.trapz)
+    # getattr's default is evaluated eagerly, so `getattr(np, "trapezoid",
+    # np.trapz)` raised on NumPy releases that have removed trapz.
+    trapz_fn = getattr(np, "trapezoid", None) or np.trapz
     return float(trapz_fn(y[m], x[m]))
 
 # SCEN_LABELS = {
@@ -630,14 +663,26 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
         # starting bound for "history" pool (all past weeks up to current)
         first_window_start = start_date - pd.Timedelta(days=7)
 
-        while True:
+        def _record_block(block_df):
+            """File a stride block's samples under their calendar weeks."""
+            sample_weeks = split_samples_by_calendar_week(
+                block_df, date_field, start_date, num_weeks=len(weekly_ll_hist)
+            )
+            for calendar_week_idx in range(max(0, week_idx_for_target - stride_weeks + 1),
+                                           week_idx_for_target + 1):
+                week_sample_df = sample_weeks.get(calendar_week_idx, block_df.iloc[0:0].copy())
+                weekly_hist[algo_name].append(week_sample_df["group"].value_counts())
+                weekly_samples[algo_name].append(week_sample_df)
+                if dec_win is not None:
+                    recent.append(week_sample_df["group"].tolist())
+
+        # Run through the window (see sampling_week_count). A sparse or empty
+        # week no longer ends the run: it used to `break`, so a thin opening
+        # week or a mid-wave dip ended sampling for every week after it.
+        while week_idx_for_target < len(weekly_ll_hist):
             prev_mon = current_week - timedelta(days=7)
             prev_sun = current_week - timedelta(days=1)
             week_df = line_df[(line_df[date_field] >= prev_mon) & (line_df[date_field] <= prev_sun)]
-
-            # Progress the weekly clock only if the *weekly* pool is viable (unchanged behavior)
-            if len(week_df) < min_pool:
-                break
 
             # ----- choose the sampling pool -----
             if scfg.get("pool_mode") == "history":
@@ -672,9 +717,14 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
 
             min_per_group = int(max(0, eff_mpg))
 
-            # If pool exhausted (e.g., due to no-replacement), stop this algorithm gracefully
+            # Nothing to sample this block -- an empty week, or a pool used up
+            # under no-replacement. Record the empty weeks and move on; new
+            # cases may arrive. (This used to `break`, ending the run.)
             if batch_size <= 0 or len(pool_df) == 0:
-                break
+                _record_block(line_df.iloc[0:0].copy())
+                current_week += timedelta(weeks=stride_weeks)
+                week_idx_for_target += stride_weeks
+                continue
 
             # ----- target distribution for this week -----
             target_dist = target_dist_at_week(weekly_ll_hist, pop_dist_static, scfg, week_idx_for_target)
@@ -715,7 +765,16 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
             state["algo_name"] = algo_name
 
             # ----- sample (seeded) FROM CHOSEN POOL -----
-            sample_df = sampler(pool_df, target_dist, batch_size, min_per_group, prior_groups, state, rng)
+            # A budget that covers the whole pool sequences all of it. Every
+            # algorithm returns the whole pool when asked for all of it, so
+            # this changes no selection; it also keeps the LASSO samplers away
+            # from pools too small for their 5-fold cross-validation, which
+            # raise on fewer than 5 cases -- common now that sparse weeks are
+            # sampled.
+            if batch_size >= len(pool_df):
+                sample_df = pool_df.copy()
+            else:
+                sample_df = sampler(pool_df, target_dist, batch_size, min_per_group, prior_groups, state, rng)
 
             # --- recover full linelist rows and preserve ORIGINAL base indices ---
             KEY_COLS = ["alias_pid", "sim_tick"]  
@@ -738,18 +797,7 @@ def run_one_scenario(line_df, date_field, pop_dist_static, weekly_ll_hist,
             if ov_norep or scfg.get("no_replacement", False):
                 used_idx.update(selected_base_idx)
 
-            sample_weeks = split_samples_by_calendar_week(
-                sample_df, date_field, start_date, num_weeks=len(weekly_ll_hist)
-            )
-            block_start_idx = max(0, week_idx_for_target - stride_weeks + 1)
-
-            for calendar_week_idx in range(block_start_idx, week_idx_for_target + 1):
-                week_sample_df = sample_weeks.get(calendar_week_idx, sample_df.iloc[0:0].copy())
-                weekly_hist[algo_name].append(week_sample_df["group"].value_counts())
-                weekly_samples[algo_name].append(week_sample_df)
-
-                if dec_win is not None:
-                    recent.append(week_sample_df["group"].tolist())
+            _record_block(sample_df)
 
             current_week += timedelta(weeks=stride_weeks)
             week_idx_for_target += stride_weeks
